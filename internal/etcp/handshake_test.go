@@ -236,6 +236,27 @@ func (c *tcpStyleConn) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// The deadline setters need the same relabelling: idleConn sets a deadline
+// before every Read and Write, so on a closed conn the setter fails first.
+func (c *tcpStyleConn) SetDeadline(t time.Time) error {
+	return c.relabel(c.Conn.SetDeadline(t))
+}
+
+func (c *tcpStyleConn) SetReadDeadline(t time.Time) error {
+	return c.relabel(c.Conn.SetReadDeadline(t))
+}
+
+func (c *tcpStyleConn) SetWriteDeadline(t time.Time) error {
+	return c.relabel(c.Conn.SetWriteDeadline(t))
+}
+
+func (c *tcpStyleConn) relabel(err error) error {
+	if err != nil && c.closed.Load() {
+		return fmt.Errorf("tcp-style set deadline: %w", net.ErrClosed)
+	}
+	return err
+}
+
 type tcpStyleDialer struct {
 	inner *scripted
 	reset bool
@@ -251,7 +272,9 @@ func (d tcpStyleDialer) DialContext(ctx context.Context, network, address string
 
 // When our half of the recover exchange completes and only then the server's
 // CatchupBuffer turns out bad, the exchange still fails with ErrIntegrity:
-// reporting success would drop the server's replayed output.
+// reporting success would hand connect a conn the reader already closed, so
+// the attempt would fail as an ordinary I/O error and the Conn would redial
+// into the same bad message forever.
 func TestRecoverReaderFailsAfterWriterSucceeds(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		bad := append(binary.LittleEndian.AppendUint64(nil, 3), 0xff, 0xff, 0xff) // does not decode
@@ -307,19 +330,22 @@ func TestRecoverReaderFailsAfterWriterSucceeds(t *testing.T) {
 // src/base/Connection.cpp:116-131 at et-v7.0.0, but the reader must not
 // depend on that).
 func TestBadRecoverMessageIsFatal(t *testing.T) {
-	bad := append(binary.LittleEndian.AppendUint64(nil, 3), 0xff, 0xff, 0xff) // does not decode
+	undecodable := append(binary.LittleEndian.AppendUint64(nil, 3), 0xff, 0xff, 0xff)
+	oversized := binary.LittleEndian.AppendUint64(nil, wire.MaxMessageSize+1)
 	emptySeq := binary.LittleEndian.AppendUint64(nil, 0)
 	tests := []struct {
 		name string
 		good [][]byte // valid messages sent before the bad one
-		tcp  bool     // report a local close as net.ErrClosed, as a TCP conn does
-		rst  bool     // report our failed write as a connection reset instead
+		bad  []byte
+		tcp  bool // report a local close as net.ErrClosed, as a TCP conn does
+		rst  bool // report our failed write as a connection reset instead
 	}{
-		{name: "sequence header"},
-		{name: "catchup buffer", good: [][]byte{emptySeq}},
-		{name: "sequence header, TCP-style close", tcp: true},
-		{name: "catchup buffer, TCP-style close", good: [][]byte{emptySeq}, tcp: true},
-		{name: "catchup buffer, write reset", good: [][]byte{emptySeq}, tcp: true, rst: true},
+		{name: "sequence header", bad: undecodable},
+		{name: "catchup buffer", good: [][]byte{emptySeq}, bad: undecodable},
+		{name: "sequence header, TCP-style close", bad: undecodable, tcp: true},
+		{name: "catchup buffer, TCP-style close", good: [][]byte{emptySeq}, bad: undecodable, tcp: true},
+		{name: "catchup buffer, write reset", good: [][]byte{emptySeq}, bad: undecodable, tcp: true, rst: true},
+		{name: "oversized catchup buffer, write reset", good: [][]byte{emptySeq}, bad: oversized, tcp: true, rst: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -333,7 +359,7 @@ func TestBadRecoverMessageIsFatal(t *testing.T) {
 					if c.respond(protocol.ConnectStatus_RETURNING_CLIENT) != nil {
 						return
 					}
-					for _, m := range append(tt.good, bad) {
+					for _, m := range append(tt.good, tt.bad) {
 						if _, err := c.conn.Write(m); err != nil {
 							return
 						}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -268,6 +269,77 @@ func TestWritePacketRacingRecovery(t *testing.T) {
 			}
 		case <-ctx.Done():
 			t.Fatal("packet written during recovery never arrived")
+		}
+	})
+}
+
+// A link that recovers and then dies before writing anything must not let the
+// replay ring grow past ReplayLimit: recover counts our catchup as sent, which
+// frees WritePacket to admit another ReplayLimit of packets, so recover must
+// also trim what the server has now received. The server here reports its
+// true received count in each SequenceHeader and drops every link right after
+// the exchange, while the caller keeps writing.
+func TestFlappingLinkKeepsRingBounded(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const limit = 1 << 10
+		var received atomic.Int32
+		s := &scripted{handle: func(i int, c *rawServer) {
+			if i == 0 {
+				if c.respond(protocol.ConnectStatus_NEW_CLIENT) != nil {
+					return
+				}
+				if _, err := wire.ReadFrame(c.br, nil); err == nil {
+					received.Store(1)
+				}
+				return
+			}
+			if c.respond(protocol.ConnectStatus_RETURNING_CLIENT) != nil {
+				return
+			}
+			var mine protocol.SequenceHeader
+			if wire.ReadMessage(c.br, &mine) != nil {
+				return
+			}
+			sh := &protocol.SequenceHeader{}
+			sh.SetSequenceNumber(received.Load())
+			if wire.WriteMessage(c.conn, sh) != nil {
+				return
+			}
+			var theirs protocol.CatchupBuffer
+			if wire.ReadMessage(c.br, &theirs) != nil {
+				return
+			}
+			received.Add(int32(len(theirs.GetBuffer())))
+			_ = wire.WriteMessage(c.conn, &protocol.CatchupBuffer{})
+		}}
+		d := etcp.Dialer{NetDialer: s, ReplayLimit: limit}
+		conn, err := d.Dial(t.Context(), testAddr, testID, testKey)
+		if err != nil {
+			t.Fatalf("Dial: %v", err)
+		}
+		var wg sync.WaitGroup
+		defer func() {
+			_ = conn.Close()
+			wg.Wait()
+			s.wg.Wait()
+		}()
+		wg.Go(func() {
+			for i := 0; ; i++ {
+				if conn.WritePacket(t.Context(), numbered(i, 100)) != nil {
+					return
+				}
+			}
+		})
+		for s.dials.Load() < 12 {
+			time.Sleep(time.Second)
+		}
+		if received.Load() == 0 {
+			t.Fatal("no catchup reached the server; the test exercises nothing")
+		}
+		// At most ReplayLimit of written entries survive a trim, plus the
+		// unsent backlog WritePacket admits: ReplayLimit and one packet.
+		if got, bound := etcp.RingBytes(conn), 2*limit+256; got > bound {
+			t.Fatalf("ring holds %d bytes after %d links, want at most %d", got, s.dials.Load(), bound)
 		}
 	})
 }

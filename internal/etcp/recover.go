@@ -109,6 +109,10 @@ func (c *Conn) recover(conn net.Conn) ([][]byte, error) {
 	c.mu.Lock()
 	c.unsent -= c.ring.bytesBetween(c.flushed, snap)
 	c.flushed = snap
+	// Trim as writeLoop does after a Write: a link that dies before its
+	// first Write would otherwise leave the catchup in the ring while
+	// WritePacket admits another ReplayLimit.
+	c.ring.trim(c.flushed)
 	room := c.unsent <= c.limit
 	c.mu.Unlock()
 	if room {
