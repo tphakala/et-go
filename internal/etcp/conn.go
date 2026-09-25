@@ -54,23 +54,41 @@ type Conn struct {
 }
 
 // WritePacket seals p and queues it for delivery. It returns once p is queued,
-// not when it is sent. A payload too large for one sealed frame (just under
-// wire.MaxFrameSize) is refused with an error wrapping wire.ErrTooLarge.
+// not when it is sent. It blocks only when the unsent backlog exceeds
+// ReplayLimit, until a link drains it, ctx ends or the Conn fails. A payload
+// too large for one sealed frame (just under wire.MaxFrameSize) is refused
+// with an error wrapping wire.ErrTooLarge.
 func (c *Conn) WritePacket(ctx context.Context, p protocol.Packet) error {
 	if len(p.Payload) > maxPayload {
 		return fmt.Errorf("etcp: packet payload of %d bytes: %w", len(p.Payload), wire.ErrTooLarge)
 	}
-	if err := ctx.Err(); err != nil {
-		return context.Cause(ctx)
+	for {
+		if err := ctx.Err(); err != nil {
+			return context.Cause(ctx)
+		}
+		if c.ctx.Err() != nil {
+			return context.Cause(c.ctx)
+		}
+		c.mu.Lock()
+		if c.unsent <= c.limit {
+			c.enqueueLocked(p)
+			room := c.unsent <= c.limit
+			c.mu.Unlock()
+			signal(c.wake)
+			if room {
+				signal(c.space) // pass the turn to another blocked writer
+			}
+			return nil
+		}
+		c.mu.Unlock()
+		select {
+		case <-c.space:
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case <-c.ctx.Done():
+			return context.Cause(c.ctx)
+		}
 	}
-	if c.ctx.Err() != nil {
-		return context.Cause(c.ctx)
-	}
-	c.mu.Lock()
-	c.enqueueLocked(p)
-	c.mu.Unlock()
-	signal(c.wake)
-	return nil
 }
 
 // ReadPacket returns the next packet from the server, blocking until one
