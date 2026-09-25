@@ -82,6 +82,11 @@ func runFakeSSH(mode string, args []string) int {
 	case "exit1":
 		// A remote failure with some other status and no output.
 		return 1
+	case "echo-cmd":
+		// A remote side that echoes the command it ran (shell tracing, a
+		// diagnostic) and then fails, before any IDPASSKEY marker.
+		fmt.Println("+ " + args[len(args)-1])
+		return 1
 	case "linger":
 		// ssh exits 0 without credentials while a descendant still holds its
 		// stdout, so Run's WaitDelay has to close the pipe.
@@ -105,6 +110,15 @@ func runFakeSSH(mode string, args []string) int {
 		}
 		return 0
 	case "hang":
+		time.Sleep(time.Hour)
+		return 0
+	case "ok-hang":
+		// Credentials arrive but ssh keeps running until it is cancelled. The
+		// signaled file records that they were printed.
+		fmt.Print(idpasskey)
+		if err := os.WriteFile(os.Getenv(fakeSSHSignaledEnv), nil, 0o600); err != nil {
+			return 97
+		}
 		time.Sleep(time.Hour)
 		return 0
 	case "trap-int":
@@ -287,6 +301,57 @@ func TestRunFailures(t *testing.T) {
 	}
 }
 
+// TestRunFailureRedactsPlaceholder: output that echoes the remote command
+// carries the generated passkey before any marker, and the error excerpt must
+// not quote it (against a server that does not regenerate, it is the session
+// passkey).
+func TestRunFailureRedactsPlaceholder(t *testing.T) {
+	cfg, argvPath := useFakeSSH(t, "echo-cmd")
+	_, err := Run(t.Context(), cfg)
+	if !errors.Is(err, ErrNoCredentials) {
+		t.Fatalf("Run() error = %v, want ErrNoCredentials", err)
+	}
+	sent := regexp.MustCompile(`^echo '([A-Z2-7]{16})/([A-Z2-7]{32})_`).FindStringSubmatch(readArgv(t, argvPath)[2])
+	if len(sent) != 3 {
+		t.Fatalf("remote command %q does not carry a placeholder id and passkey", readArgv(t, argvPath)[2])
+	}
+	if strings.Contains(err.Error(), sent[2]) {
+		t.Fatalf("error quotes the generated passkey: %v", err)
+	}
+	// The rest of the echoed line stays, so the excerpt still helps.
+	if !strings.Contains(err.Error(), redacted) || !strings.Contains(err.Error(), "etterminal --verbose=0") {
+		t.Fatalf("error %q lost the echoed command around the redaction", err)
+	}
+}
+
+func TestRedactSecret(t *testing.T) {
+	// A secret with no repeated 8-byte window, so each expected value follows
+	// from the window rule alone; the values are written out so a redaction
+	// that also eats surrounding text fails.
+	const secret = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+	tests := []struct {
+		name, out, want string
+	}{
+		{"whole", "x " + secret + " y", "x REDACTED y"},
+		{"twice", secret + secret, "REDACTEDREDACTED"},
+		{"split across lines", "x " + secret[:20] + "\n" + secret[20:] + " y", "x REDACTEDREDACTEDQRST\nREDACTED4567 y"},
+		{"cut short", "x " + secret[:10], "x REDACTEDIJ"},
+		{"unaligned piece", "x " + secret[3:15] + " y", "x REDACTEDLMNO y"},
+		{"short piece survives", "x " + secret[:5] + " y", "x ABCDE y"},
+		{"unrelated", "Welcome to the server", "Welcome to the server"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := string(redactSecret([]byte(tt.out), secret)); got != tt.want {
+				t.Fatalf("redactSecret(%q) = %q, want %q", tt.out, got, tt.want)
+			}
+		})
+	}
+	if got := string(redactSecret([]byte("abc"), "")); got != "abc" {
+		t.Fatalf("redactSecret with an empty secret = %q, want the output unchanged", got)
+	}
+}
+
 func TestRunCancel(t *testing.T) {
 	cfg, _ := useFakeSSH(t, "hang")
 	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
@@ -299,6 +364,30 @@ func TestRunCancel(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("Run() took %v after cancel, want it bounded by waitDelay", elapsed)
+	}
+}
+
+// TestRunCancelWinsOverCredentials: when the caller cancels while ssh is still
+// running, Run reports the cancellation even if the credentials already
+// arrived, so a Ctrl+C during bootstrap never goes on to connect.
+func TestRunCancelWinsOverCredentials(t *testing.T) {
+	cfg, _ := useFakeSSH(t, "ok-hang")
+	printed := filepath.Join(t.TempDir(), "printed")
+	t.Setenv(fakeSSHSignaledEnv, printed)
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+
+	creds, err := Run(ctx, cfg)
+	if _, statErr := os.Stat(printed); statErr != nil {
+		// Without printed credentials the run never reaches the branch under
+		// test; say so instead of passing without exercising it.
+		t.Skipf("the fake did not print credentials before the deadline (%v); the host is too slow for this test", statErr)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run() = %v, %v; want context.DeadlineExceeded", creds, err)
+	}
+	if creds.ID != "" || creds.Passkey() != "" {
+		t.Fatalf("Run() returned credentials %v alongside the cancellation", creds)
 	}
 }
 

@@ -54,6 +54,8 @@ type Config struct {
 // ssh's exit status does not decide success: etterminal daemonises after
 // printing its credentials, so ssh can exit 0 or not regardless
 // (upstream src/terminal/TerminalMain.cpp:185-188, MEASURED against etserver 7.0.0).
+// Cancellation does: once ctx is done, Run returns its error even if the
+// credentials had already been printed.
 //
 //nolint:gocritic // hugeParam: Config is taken by value on purpose so Run fills defaults on its own copy and never mutates the caller's; bootstrap runs once per session, not on a hot path.
 func Run(ctx context.Context, cfg Config) (Credentials, error) {
@@ -92,7 +94,9 @@ func Run(ctx context.Context, cfg Config) (Credentials, error) {
 
 	runErr := cmd.Run()
 	creds, parseErr := parseCredentials(out.Bytes())
-	if parseErr == nil {
+	// A cancelled ctx wins even over credentials that already arrived: the
+	// caller asked to stop, so it must not go on to connect.
+	if parseErr == nil && ctx.Err() == nil {
 		if creds.ID == id {
 			logger.Warn("etterminal did not regenerate the session id; the passkey in use was visible in the ssh command line on both hosts",
 				"credentials", creds)
@@ -108,7 +112,31 @@ func Run(ctx context.Context, cfg Config) (Credentials, error) {
 	if runErr != nil && !isExit && !errors.Is(runErr, exec.ErrWaitDelay) {
 		return Credentials{}, fmt.Errorf("bootstrap: run %s: %w", sshPath, runErr)
 	}
-	return Credentials{}, describeFailure(exitErr, parseErr, out.Bytes())
+	// The remote side may echo the command it ran (shell tracing, a
+	// diagnostic) before any marker, and against a server that does not
+	// regenerate, the generated passkey is the session passkey, so it is
+	// redacted before any output can be quoted.
+	return Credentials{}, describeFailure(exitErr, parseErr, redactSecret(out.Bytes(), passkey))
+}
+
+// minFragment is the shortest piece of a secret redactSecret removes.
+const minFragment = 8
+
+// redactSecret replaces secret in out, and every minFragment-byte piece of it,
+// so a copy split across lines or cut short is removed too. Only pieces
+// shorter than minFragment bytes can survive (the tail of a longer fragment,
+// or a whole short one), far too little to recover a 32-character passkey.
+func redactSecret(out []byte, secret string) []byte {
+	if secret == "" {
+		// bytes.ReplaceAll with an empty old value would insert the
+		// replacement between every byte.
+		return out
+	}
+	out = bytes.ReplaceAll(out, []byte(secret), []byte(redacted))
+	for i := 0; i+minFragment <= len(secret); i++ {
+		out = bytes.ReplaceAll(out, []byte(secret[i:i+minFragment]), []byte(redacted))
+	}
+	return out
 }
 
 // describeFailure builds the single error the user sees when ssh finished
