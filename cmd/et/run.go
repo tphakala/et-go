@@ -21,8 +21,11 @@ import (
 // version is set at release time with -ldflags "-X main.version=...".
 var version = "dev"
 
-// detachedMessage is printed after the local escape or Ctrl+Break.
-const detachedMessage = "Detached; the session stays on the server until it times out."
+// detachedMessage is printed after the local escape or Ctrl+Break. etserver
+// keeps a detached session: et-v7.0.0 has no disconnect timeout (a TODO in
+// src/terminal/TerminalServer.cpp:415-417), and upstream master's
+// disconnect_timeout defaults to 0, meaning none (etc/et.cfg:10-12).
+const detachedMessage = "Detached. The remote shell keeps running on the server until it exits or etserver's disconnect_timeout closes it; et cannot reattach to it."
 
 // sessionConn is what run needs from the etserver connection.
 type sessionConn interface {
@@ -164,7 +167,9 @@ func connect(ctx context.Context, o *options, e env, log *slog.Logger) error {
 	}
 	// Restore on every return, and on a panic in this goroutine restore
 	// first, then re-panic (Go prints "[recovered, repanicked]" with the
-	// original stack).
+	// original stack). This covers connect's goroutine only: a panic in a
+	// goroutine of session or etcp ends the process without running this
+	// defer, and the console stays raw.
 	defer func() {
 		_ = restore()
 		if r := recover(); r != nil {
@@ -176,7 +181,7 @@ func connect(ctx context.Context, o *options, e env, log *slog.Logger) error {
 	return session.Run(ctx, conn, opts)
 }
 
-// exitCode maps the session outcome to the process exit status (spec 5.8).
+// exitCode maps the session outcome to the process exit status.
 func exitCode(err error, stderr io.Writer) int {
 	if err == nil {
 		return 0

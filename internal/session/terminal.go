@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	// maxPending caps keyboard input waiting to be sent (spec 5.7).
+	// maxPending caps keyboard input waiting to be sent.
 	maxPending = 1 << 20
 	// pendingGrace is how long the reader waits for the sender to make room
 	// before dropping input. While connected the sender frees space within
@@ -28,8 +28,8 @@ const (
 )
 
 // defaultSize replaces a window size with zero rows or columns. A pty whose
-// size was never set can report 0x0, and a 0x0 TERMINAL_INFO breaks remote
-// full-screen programs.
+// size was never set can report 0x0; sending 80x24 instead gives the remote
+// pty a usable size.
 var defaultSize = console.Size{Rows: 24, Cols: 80}
 
 // terminalService is the interactive terminal: remote output to the local
@@ -66,8 +66,8 @@ func (s *terminalService) headers() []protocol.Header {
 }
 
 func (s *terminalService) start(ctx context.Context, t Transport, in iter.Seq[protocol.Packet], g *group) {
-	// Resizes takes its change baseline when it is called (console contract,
-	// plan 04), so call it before reading the initial size: a resize between
+	// Resizes takes its change baseline when it is called (console contract),
+	// so call it before reading the initial size: a resize between
 	// the two is then reported rather than lost.
 	resizes := s.term.Resizes(ctx)
 	if sz, err := s.term.Size(); err == nil {
@@ -104,8 +104,9 @@ func (s *terminalService) output(ctx context.Context, in iter.Seq[protocol.Packe
 }
 
 // read moves keyboard input through the escape filter into the pending
-// buffer. It never waits on the network, so the escape is seen even while
-// the connection is stalled.
+// buffer. It does not wait on the network: when the buffer is full it waits
+// at most pendingGrace for the sender, then drops input, so the escape is
+// seen promptly even while the connection is stalled.
 func (s *terminalService) read(ctx context.Context) error {
 	buf := make([]byte, readBufSize)
 	var esc escapeFilter
@@ -201,8 +202,8 @@ func signal(c chan struct{}) {
 }
 
 // pendingInput is keyboard input waiting for the sender. The mutex guards
-// short critical sections only; all waiting happens on channels (index
-// Global Constraints), so synctest can drive it.
+// short critical sections only; all waiting happens on channels, so synctest
+// can drive it.
 type pendingInput struct {
 	mu      sync.Mutex
 	buf     []byte

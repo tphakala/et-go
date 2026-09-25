@@ -41,12 +41,11 @@ func Run(ctx context.Context, t Transport, opts Options) error {
 
 	<-ctx.Done()
 	// Closing the terminal is the only way to unblock a pending Read, and the
-	// reader goroutine must be joined before Run returns (spec 4.3).
-	// console.Close contract (phase 4): on Windows a non-nil error can mean
-	// the reader is still blocked in ReadConsoleW (the wake record was taken
-	// by another process sharing the console, or Close waited on a stalled
-	// Write). Spec 5.6: Run then stops waiting for the reader instead of
-	// joining it, and the error is logged at Warn so a hang is visible.
+	// reader goroutine must be joined before Run returns. On Windows a
+	// non-nil error from console.Close can mean the reader is still blocked
+	// in ReadConsoleW (the wake record was taken by another process sharing
+	// the console). Run then stops waiting for the reader instead of joining
+	// it, and the error is logged at Warn so a hang is visible.
 	readerStuck := false
 	if opts.Terminal != nil {
 		if err := opts.Terminal.Close(); err != nil {

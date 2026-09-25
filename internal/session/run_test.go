@@ -146,7 +146,7 @@ func TestRunZeroSizeSentAs80x24(t *testing.T) {
 	})
 }
 
-// Review Focus 3: resizes during an outage; the server must end up with the
+// Resizes during an outage: the server must end up with the
 // latest size, and stale intermediate sizes are not sent after it.
 func TestRunResizeDuringOutage(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
@@ -230,7 +230,7 @@ func TestRunDetachWhileTransportBlocked(t *testing.T) {
 	})
 }
 
-// Review Focus 5: a 5 MiB paste is sent byte-exact, in order, in packets of
+// A 5 MiB paste is sent byte-exact, in order, in packets of
 // at most MaxInputPacket bytes. The first MiB arrives while the transport is
 // paused, so input piles up in the pending buffer and the sender must split
 // the backlog; without the pause every read would fit one packet anyway.

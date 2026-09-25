@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// Review Focus 4: every destination form, and -p / -u precedence.
+// Every destination form, and -p / -u precedence.
 func TestParseArgsDestination(t *testing.T) {
 	tests := []struct {
 		name    string

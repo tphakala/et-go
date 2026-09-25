@@ -15,7 +15,7 @@ import (
 )
 
 // service is one feature multiplexed over the session's packet stream. It is
-// unexported while the terminal is its only implementation (spec 4.2 rule 1).
+// unexported while the terminal is its only implementation.
 type service interface {
 	// headers lists the packet types routed to this service.
 	headers() []protocol.Header
@@ -23,7 +23,9 @@ type service interface {
 	// through in, in order; it writes with t. The service must range over in
 	// exactly once: on a normal end the router waits until in is drained, so
 	// output the server sent just before ending still reaches the service.
-	// Every goroutine must return once ctx is done.
+	// Every goroutine must return once ctx is done and Run has closed the
+	// terminal (a goroutine blocked in a terminal Read or Write returns only
+	// then).
 	start(ctx context.Context, t Transport, in iter.Seq[protocol.Packet], g *group)
 }
 
@@ -163,6 +165,10 @@ func (r *router) run(ctx context.Context, t Transport) error {
 				exit = &ExitError{Code: int(st.GetExitcode())}
 			}
 		case protocol.HeaderTerminalClose:
+			// Defensive: upstream master sends TERMINAL_CLOSE only from the
+			// client to the server (src/terminal/TerminalClient.cpp:241,666),
+			// and et-v7.0.0 has no such packet type; no server is known to
+			// send it to a client.
 			return ended()
 		default:
 			q, ok := r.routes[p.Header]

@@ -46,11 +46,11 @@ et [flags] [user@]host[:port]
       --version
 ```
 
-`et` runs `ssh` once to start `etterminal` on the server, so everything in your ssh config (keys, agent, `ProxyJump`, host aliases) applies. It then connects to `etserver` on port 2022. If the network drops, `et` reconnects on its own and the remote shell never notices.
+`et` runs `ssh` once to start `etterminal` on the server, so everything in your ssh config (keys, agent, `ProxyJump`, host aliases, `--ssh-option` values) applies to that ssh connection. It then connects to `etserver` directly over TCP, on port 2022 by default (`-p` or `host:port` to change it), at the host name your ssh config resolves to; a `ProxyJump` host is not used for this connection, so the etserver port must be reachable from the client. If the network drops, `et` reconnects on its own and the remote shell never notices.
 
-To leave without ending the remote shell, press Enter, then `~` and `.`. The session stays on the server until it times out. Type `~~` to send a literal `~` at the start of a line.
+To leave without ending the remote shell, press Enter, then `~` and `.` (on Windows, Ctrl+Break also works once the session is running). The remote shell keeps running on the server until it exits, or until etserver closes disconnected sessions if it is configured to (`disconnect_timeout`, off by default); `et` cannot reattach to it. Type `~~` to send a literal `~` at the start of a line.
 
-Exit status: the remote shell's exit status when the server reports it, 0 when the shell exits or you detach, 2 for command-line mistakes, 255 for any other error.
+Exit status: the remote shell's exit status when the server reports it, 0 when the shell exits without reporting one or you detach, 2 for command-line mistakes, 255 for any other error, including an interrupt before the session starts. Upstream `et` exits 0 for interactive sessions whatever the shell's status.
 
 Logs are off by default. `-v` writes a debug log to `%LOCALAPPDATA%\et-go\et.log` on Windows and `$XDG_STATE_HOME/et-go/et.log` (default `~/.local/state/et-go/et.log`) elsewhere; `--log-file` picks the path. The session passkey is never logged.
 

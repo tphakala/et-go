@@ -1,7 +1,7 @@
 // Package session runs one Eternal Terminal session over a transport: the
 // start handshake, a router that splits the incoming packet stream by header,
 // and the services that handle those packets. The interactive terminal is the
-// first service; port forwarding is meant to become the second (spec 5.9).
+// first service; port forwarding is meant to become the second.
 package session
 
 import (

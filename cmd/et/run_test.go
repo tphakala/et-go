@@ -104,9 +104,11 @@ type fakeConsole struct {
 	// makeRawErr, when set, makes MakeRaw fail instead of succeeding.
 	makeRawErr error
 	// sizePanic, when set, makes Size panic with that value instead of
-	// returning normally. Size is called synchronously from session.Run's
-	// caller goroutine (terminalService.start, before any of its goroutines
-	// are spawned), so this exercises connect's panic-then-restore defer.
+	// returning normally. Size is called synchronously on connect's goroutine
+	// (session.Run, in terminalService.start), so the panic unwinds connect
+	// and exercises its panic-then-restore defer. session.Run has already
+	// started its router goroutine by then; it exits once connect's context
+	// is cancelled.
 	sizePanic any
 }
 
@@ -312,9 +314,11 @@ func TestRunNewLoggerFailure(t *testing.T) {
 // TestDefaultEnvWiring pins that defaultEnv's closures reach the real
 // packages they wrap (bootstrap, resolveHost, etcp, console), without
 // requiring a live etserver or a controlling terminal: resolveHost falls
-// back to the host unchanged, dial fails against an address nothing listens
-// on, and openConsole either fails (no controlling terminal in the test
-// environment) or succeeds and is closed.
+// back to the host unchanged, dial returns an error (the 4-byte test
+// passkey fails etcp's length check before any network I/O), and
+// openConsole either fails (no controlling terminal in the test
+// environment) or succeeds and is closed; that last call only exercises the
+// path and asserts nothing.
 func TestDefaultEnvWiring(t *testing.T) {
 	e := defaultEnv()
 	if e.bootstrap == nil || e.resolveHost == nil || e.dial == nil || e.openConsole == nil || e.getenv == nil || e.onBreak == nil {
@@ -407,8 +411,8 @@ func TestConnectMakeRawFailure(t *testing.T) {
 
 // TestConnectPanicDuringRunStillRestores pins that a panic reaching connect
 // while raw restores the console before the panic is re-raised: the recover
-// in connect's last defer exists to guarantee that ordering, not to hide the
-// panic (spec: run.go connect doc comment).
+// in connect's restore defer exists to guarantee that ordering, not to hide
+// the panic.
 func TestConnectPanicDuringRunStillRestores(t *testing.T) {
 	ev := &events{}
 	con := newFakeConsole(ev)

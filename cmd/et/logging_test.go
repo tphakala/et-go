@@ -114,7 +114,7 @@ func TestNewLoggerOpenFileFailure(t *testing.T) {
 }
 
 // TestDefaultLogPathHomeFallback pins the $HOME fallback used when
-// XDG_STATE_HOME is unset (spec: defaultLogPath doc comment).
+// XDG_STATE_HOME is unset, as defaultLogPath's doc comment states.
 func TestDefaultLogPathHomeFallback(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("LOCALAPPDATA governs the path on windows; see TestDefaultLogPath")
