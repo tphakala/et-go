@@ -51,7 +51,11 @@ type Dialer struct {
 		DialContext(ctx context.Context, network, address string) (net.Conn, error)
 	}
 	// KeepAlive is the quiet period after which a probe is sent; after two quiet
-	// periods the link is declared dead. Zero means 5 s (upstream's maximum,
+	// periods the link is declared dead. Only inbound frames count as proof
+	// of life, and the probe queues behind any unsent backlog, so an upload
+	// that takes longer than two periods to drain while the server sends
+	// nothing costs a reconnect (the data survives it). Zero means 5 s
+	// (upstream's maximum,
 	// src/base/Headers.hpp:180 at et-v7.0.0); Dial refuses a negative value
 	// or one below 100 ms. Probing starts only after the
 	// first WritePacket, because etserver aborts when a session's first packet

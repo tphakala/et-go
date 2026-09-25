@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tphakala/et-go/internal/etcp"
+	"github.com/tphakala/et-go/internal/etservertest"
 	"github.com/tphakala/et-go/internal/protocol"
 	"github.com/tphakala/et-go/internal/wire"
 )
@@ -128,6 +129,37 @@ func TestDialRejectsOversizedProbe(t *testing.T) {
 		s.wg.Wait()
 		if !errors.Is(err, wire.ErrTooLarge) || s.dials.Load() != 0 {
 			t.Fatalf("Dial = %v after %d dials; want wire.ErrTooLarge before dialing", err, s.dials.Load())
+		}
+	})
+}
+
+// A long upload over a slow uplink queues the probe behind the backlog, so
+// its echo comes late while the server itself sends nothing, and the
+// watcher may drop the link (the KeepAlive doc states this limit). Whatever
+// reconnects that costs, every packet must still arrive exactly once and in
+// order.
+func TestLivenessSlowUploadDeliversEverything(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		srv := etservertest.NewServer(testID, testKey)
+		nw := etservertest.NewNetwork(srv)
+		defer nw.Close()
+		d := etcp.Dialer{NetDialer: throttledDialer{inner: nw}}
+		conn, err := d.Dial(t.Context(), testAddr, testID, testKey)
+		if err != nil {
+			t.Fatalf("Dial: %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+
+		const n = 400 // 400 KiB at 8 KiB/s: 50 s, ten keepalive periods
+		for i := range n {
+			if err := conn.WritePacket(t.Context(), numbered(i, 1024)); err != nil {
+				t.Fatalf("WritePacket %d: %v", i, err)
+			}
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
+		defer cancel()
+		if err := expectNumbered(ctx, n, srv.Recv); err != nil {
+			t.Fatalf("server side: %v", err)
 		}
 	})
 }
