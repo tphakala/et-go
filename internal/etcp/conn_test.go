@@ -78,6 +78,43 @@ func TestDialErrors(t *testing.T) {
 	}
 }
 
+// Options that cannot work are refused before dialing: a negative KeepAlive
+// fires the watcher at once and redials forever, a negative ReplayLimit
+// blocks every write, and a limit above upstream's 64 MiB lets a catchup
+// outgrow what etserver accepts.
+func TestDialRejectsBadOptions(t *testing.T) {
+	tests := []struct {
+		name string
+		d    etcp.Dialer
+	}{
+		{name: "negative KeepAlive", d: etcp.Dialer{KeepAlive: -time.Second}},
+		{name: "tiny KeepAlive", d: etcp.Dialer{KeepAlive: time.Nanosecond}},
+		{name: "negative ReplayLimit", d: etcp.Dialer{ReplayLimit: -1}},
+		{name: "ReplayLimit above 64 MiB", d: etcp.Dialer{ReplayLimit: 64<<20 + 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				s := &scripted{handle: func(_ int, c *rawServer) {
+					if c.respond(protocol.ConnectStatus_NEW_CLIENT) == nil {
+						c.drain()
+					}
+				}}
+				d := tt.d
+				d.NetDialer = s
+				conn, err := d.Dial(t.Context(), testAddr, testID, testKey)
+				if err == nil {
+					_ = conn.Close()
+				}
+				s.wg.Wait()
+				if err == nil || s.dials.Load() != 0 {
+					t.Fatalf("Dial = %v after %d dials; want an error before dialing", err, s.dials.Load())
+				}
+			})
+		})
+	}
+}
+
 func TestDialRejectsShortPasskey(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := &scripted{handle: func(_ int, c *rawServer) {

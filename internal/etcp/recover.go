@@ -9,6 +9,7 @@ import (
 
 	"github.com/tphakala/et-go/internal/protocol"
 	"github.com/tphakala/et-go/internal/wire"
+	"google.golang.org/protobuf/proto"
 )
 
 // supervise owns reconnects: it runs a link until it dies, then redials with
@@ -107,8 +108,16 @@ func (c *Conn) recover(conn net.Conn) ([][]byte, error) {
 	return theirs.GetBuffer(), nil
 }
 
+// maxCatchupSize is the largest CatchupBuffer we send: etserver refuses
+// handshake messages above 128 MiB (src/base/SocketHandler.hpp:60 at
+// et-v7.0.0), the same bound as wire.MaxMessageSize. It is a variable only
+// so a test can lower it.
+var maxCatchupSize = wire.MaxMessageSize
+
 // writeRecover writes our half of the recover exchange and returns the
-// sequence number the new link starts sending from.
+// sequence number the new link starts sending from. It fails with
+// ErrReplayExceeded when the peer's position is outside the retained window
+// or our catchup is too large for one message.
 func (c *Conn) writeRecover(conn net.Conn, gotSeq <-chan error, peer *protocol.SequenceHeader) (int64, error) {
 	mine := &protocol.SequenceHeader{}
 	mine.SetSequenceNumber(int32(c.recvSeq))
@@ -132,6 +141,12 @@ func (c *Conn) writeRecover(conn net.Conn, gotSeq <-chan error, peer *protocol.S
 	}
 	cb := &protocol.CatchupBuffer{}
 	cb.SetBuffer(ours)
+	// A catchup the server cannot accept would fail the same way on every
+	// redial, so it ends the Conn instead.
+	if size := proto.Size(cb); size > maxCatchupSize {
+		return 0, fmt.Errorf("%w: catchup of %d bytes exceeds the %d-byte message limit",
+			ErrReplayExceeded, size, maxCatchupSize)
+	}
 	if err := wire.WriteMessage(conn, cb); err != nil {
 		return 0, fmt.Errorf("etcp: write catchup: %w", err)
 	}

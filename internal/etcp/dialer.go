@@ -20,8 +20,15 @@ import (
 
 const (
 	defaultKeepAlive   = 5 * time.Second // upstream's maximum (src/base/Headers.hpp:180 at et-v7.0.0)
-	defaultReplayLimit = 64 << 20        // upstream MAX_BACKUP_BYTES (src/base/BackedWriter.hpp:32)
+	defaultReplayLimit = 64 << 20        // upstream MAX_BACKUP_BYTES (src/base/BackedWriter.hpp:32 at et-v7.0.0)
 	dialTimeout        = 10 * time.Second
+
+	// minKeepAlive is the smallest non-zero KeepAlive Dial accepts; below it
+	// the watcher would probe and drop links faster than any round trip.
+	minKeepAlive = 100 * time.Millisecond
+	// maxReplayLimit is the largest ReplayLimit Dial accepts: upstream's own
+	// bound, which keeps a catchup well inside the message limit.
+	maxReplayLimit = defaultReplayLimit
 )
 
 // ErrSessionEnded reports that the server ended the session, normally because
@@ -45,7 +52,8 @@ type Dialer struct {
 	}
 	// KeepAlive is the quiet period after which a probe is sent; after two quiet
 	// periods the link is declared dead. Zero means 5 s (upstream's maximum,
-	// src/base/Headers.hpp:180 at et-v7.0.0). Probing starts only after the
+	// src/base/Headers.hpp:180 at et-v7.0.0); Dial refuses a negative value
+	// or one below 100 ms. Probing starts only after the
 	// first WritePacket, because etserver aborts when a session's first packet
 	// is not INITIAL_PAYLOAD (src/terminal/TerminalServer.cpp:429-439); before
 	// that, a dead link is detected only by TCP keepalive.
@@ -54,11 +62,18 @@ type Dialer struct {
 	// with no payload, which is KEEP_ALIVE, echoed by etserver once the session
 	// runs (src/terminal/TerminalServer.cpp:389-393 at et-v7.0.0).
 	Probe protocol.Packet
-	// ReplayLimit bounds the sealed bytes kept for replay. Zero means 64 MiB.
-	// Packets count as sent once written to the socket, and written packets
-	// are trimmed first, so a window smaller than what the kernel and the
-	// network can hold in flight turns a reconnect into ErrReplayExceeded.
-	// Small values are for tests only.
+	// ReplayLimit bounds the sealed bytes kept for replay; Dial refuses a
+	// negative value or one above 64 MiB, and zero means 64 MiB. It is a soft
+	// bound applied separately to the two kinds of retained packets: packets
+	// already written to a socket are trimmed down to it, and WritePacket
+	// blocks while the not-yet-written backlog exceeds it (a single packet
+	// may take the backlog over, and probes are never blocked). While
+	// disconnected the ring can therefore hold about twice ReplayLimit plus
+	// one packet. Packets count as sent once written to the socket, and
+	// written packets are trimmed first, so a window smaller than what the
+	// kernel and the network can hold in flight turns a reconnect into
+	// ErrReplayExceeded; so does a catchup too large for one handshake
+	// message. Small values are for tests only.
 	ReplayLimit int
 	// Logger receives connection events. Nil discards them.
 	Logger *slog.Logger
@@ -68,14 +83,21 @@ type Dialer struct {
 // RETURNING_CLIENT answer (upstream allows it when a first attempt died after
 // registering, src/base/ClientConnection.cpp:36-39) runs the recover exchange
 // with empty state. INVALID_KEY yields ErrRejected and MISMATCHED_PROTOCOL
-// yields ErrVersion. A passkey that is not 32 bytes, or a Probe payload too
-// large for one sealed frame, is refused before dialing.
+// yields ErrVersion. A passkey that is not 32 bytes, a Probe payload too
+// large for one sealed frame, or a KeepAlive or ReplayLimit outside the range
+// its field documents is refused before dialing.
 func (d *Dialer) Dial(ctx context.Context, addr, id, passkey string) (*Conn, error) {
 	if len(passkey) != 32 {
 		return nil, fmt.Errorf("etcp: passkey must be 32 bytes, got %d", len(passkey))
 	}
 	if len(d.Probe.Payload) > maxPayload {
 		return nil, fmt.Errorf("etcp: probe payload of %d bytes: %w", len(d.Probe.Payload), wire.ErrTooLarge)
+	}
+	if d.KeepAlive < 0 || (d.KeepAlive > 0 && d.KeepAlive < minKeepAlive) {
+		return nil, fmt.Errorf("etcp: KeepAlive %v: must be 0 (the default) or at least %v", d.KeepAlive, minKeepAlive)
+	}
+	if d.ReplayLimit < 0 || d.ReplayLimit > maxReplayLimit {
+		return nil, fmt.Errorf("etcp: ReplayLimit %d: must be between 0 (the default) and %d", d.ReplayLimit, maxReplayLimit)
 	}
 	c := d.newConn(addr, id, passkey)
 	nc, catchup, err := c.connect(ctx, true)

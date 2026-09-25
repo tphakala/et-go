@@ -138,6 +138,53 @@ func TestReplayWindowExceeded(t *testing.T) {
 	}
 }
 
+// A catchup too large for one handshake message (etserver refuses messages
+// above wire.MaxMessageSize, src/base/SocketHandler.hpp:60 at et-v7.0.0) can
+// never be sent, so the Conn ends with ErrReplayExceeded instead of redialing
+// forever. The limit is lowered so a few KiB reach it.
+func TestOversizedCatchupIsFatal(t *testing.T) {
+	defer etcp.SetMaxCatchupSize(1 << 10)()
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		s := &scripted{handle: func(i int, c *rawServer) {
+			if i == 0 {
+				// Accept the link but read nothing until released, so the
+				// packets below stay unsent and land in the catchup.
+				if c.respond(protocol.ConnectStatus_NEW_CLIENT) == nil {
+					<-release
+				}
+				return
+			}
+			c.claimSequence(0)
+		}}
+		d := etcp.Dialer{NetDialer: s}
+		conn, err := d.Dial(t.Context(), testAddr, testID, testKey)
+		if err != nil {
+			t.Fatalf("Dial: %v", err)
+		}
+		defer func() {
+			_ = conn.Close()
+			s.wg.Wait()
+		}()
+		for i := range 8 { // about 8 KiB of catchup against a 1 KiB limit
+			if err := conn.WritePacket(t.Context(), numbered(i, 1024)); err != nil {
+				t.Fatalf("WritePacket: %v", err)
+			}
+		}
+		synctest.Wait()
+		close(release)
+
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		if _, err := conn.ReadPacket(ctx); !errors.Is(err, etcp.ErrReplayExceeded) {
+			t.Fatalf("ReadPacket = %v, want ErrReplayExceeded", err)
+		}
+		if got := s.dials.Load(); got != 2 {
+			t.Fatalf("dials = %d, want 2: an oversized catchup must not be retried", got)
+		}
+	})
+}
+
 // A packet that fails authentication ends the Conn; it is not retried.
 func TestIntegrityFailureIsFatal(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
