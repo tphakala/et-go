@@ -60,6 +60,11 @@ type Console struct {
 	injectFn func(h windows.Handle, recs []inputRecord) error
 	writeFn  func(h windows.Handle, buf *uint16, n uint32, written *uint32, reserved *byte) error
 
+	// getModeFn and setModeFn read and set a console mode when restoring
+	// (GetConsoleMode, SetConsoleMode). nil means the real call.
+	getModeFn func(h windows.Handle, mode *uint32) error
+	setModeFn func(h windows.Handle, mode uint32) error
+
 	// Reader-owned state.
 	dec     utf16Decoder
 	units   []uint16
@@ -166,8 +171,8 @@ func (c *Console) restore() error {
 // current mode differs from it. c.mu must be held.
 func (c *Console) restoreLocked() error {
 	err := errors.Join(
-		setModeIfChanged(c.in, c.inBase),
-		setModeIfChanged(c.out, c.outBase),
+		c.setModeIfChanged(c.in, c.inBase),
+		c.setModeIfChanged(c.out, c.outBase),
 	)
 	if err != nil {
 		return fmt.Errorf("console: restore: %w", err)
@@ -175,15 +180,22 @@ func (c *Console) restoreLocked() error {
 	return nil
 }
 
-func setModeIfChanged(h windows.Handle, mode uint32) error {
+func (c *Console) setModeIfChanged(h windows.Handle, mode uint32) error {
+	get, set := c.getModeFn, c.setModeFn
+	if get == nil {
+		get = windows.GetConsoleMode
+	}
+	if set == nil {
+		set = windows.SetConsoleMode
+	}
 	var cur uint32
-	if err := windows.GetConsoleMode(h, &cur); err != nil {
+	if err := get(h, &cur); err != nil {
 		return err
 	}
 	if cur == mode {
 		return nil
 	}
-	return windows.SetConsoleMode(h, mode)
+	return set(h, mode)
 }
 
 // Read reads raw VT input as UTF-8. Once Close has run, Read returns
@@ -239,7 +251,9 @@ func (c *Console) Read(p []byte) (int, error) {
 // Once Close has started Write returns an error satisfying
 // errors.Is(err, os.ErrClosed) and writes nothing. A Write already in
 // progress when Close starts finishes first: Close restores the console
-// modes only after it returns.
+// modes only after it returns. This differs from Unix, where a Write that
+// runs while Close is in progress can still reach the terminal until Close
+// closes the descriptor.
 func (c *Console) Write(p []byte) (int, error) {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
@@ -320,8 +334,10 @@ func (c *Console) Resizes(ctx context.Context) iter.Seq[Size] {
 // too. Like a restore func, it sets a baseline mode only where the current
 // mode differs from it. Close unblocks a pending Read, which then returns
 // os.ErrClosed, and flushes the input buffer. A Write in progress when
-// Close starts finishes before the modes are restored. The handles are the
-// process's standard handles and stay open.
+// Close starts finishes before the modes are restored. Close waits for it
+// with no bound: whether WriteConsoleW can stall (for example while a
+// classic conhost QuickEdit selection pauses output) is unmeasured. The
+// handles are the process's standard handles and stay open.
 //
 // Close is idempotent. A second Close that runs while the first is still in
 // progress waits for the first to finish, then returns nil; a Close after

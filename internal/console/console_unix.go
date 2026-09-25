@@ -24,6 +24,10 @@ import (
 // crashes. Fd is never called on the file: per the os.File.Fd docs its
 // deadline methods would then stop working. All ioctls go through
 // SyscallConn.
+//
+// Read and Write each have one owner goroutine: Read is not safe to call
+// concurrently with itself, nor Write with itself; Read and Write may run
+// concurrently with each other and with Close.
 type Console struct {
 	tty  *os.File
 	base *term.State // terminal state when the console was opened
@@ -150,7 +154,10 @@ func (c *Console) Read(p []byte) (int, error) { return c.tty.Read(p) }
 
 // Write writes remote output to the terminal. After Close it returns an
 // error satisfying errors.Is(err, os.ErrClosed), which os.File reports for
-// a closed file.
+// a closed file. A Write that runs while Close is in progress can still
+// reach the terminal until Close closes the descriptor, possibly after the
+// mode was restored. This differs from Windows, where Write writes nothing
+// once Close has started.
 func (c *Console) Write(p []byte) (int, error) { return c.tty.Write(p) }
 
 // Size returns the current window size, including pixels when known. After

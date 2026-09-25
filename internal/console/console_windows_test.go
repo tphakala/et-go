@@ -5,6 +5,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf16"
@@ -359,6 +360,95 @@ func TestRestoreReturnsToOpenBaseline(t *testing.T) {
 	if mode != c.inBase {
 		t.Fatalf("input mode after restore = %#x, want the Open baseline %#x", mode, c.inBase)
 	}
+}
+
+// fakeModes makes c's restore read the given modes, in call order, and
+// records the modes it sets. It needs no console.
+func fakeModes(c *Console, reported ...uint32) *[]uint32 {
+	var set []uint32
+	c.getModeFn = func(_ windows.Handle, mode *uint32) error {
+		*mode = reported[0]
+		reported = reported[1:]
+		return nil
+	}
+	c.setModeFn = func(_ windows.Handle, mode uint32) error {
+		set = append(set, mode)
+		return nil
+	}
+	return &set
+}
+
+// TestRestoreSkipsUnchangedMode needs no console: Close sets a handle's
+// baseline mode only when the current mode differs from it.
+func TestRestoreSkipsUnchangedMode(t *testing.T) {
+	const inBase, outBase = 0x1f7, 0x7
+	for _, tc := range []struct {
+		name     string
+		reported []uint32 // input mode, then output mode
+		want     []uint32
+	}{
+		{name: "at_baseline", reported: []uint32{inBase, outBase}, want: nil},
+		{name: "input_changed", reported: []uint32{0x3f0, outBase}, want: []uint32{inBase}},
+		{name: "both_changed", reported: []uint32{0x3f0, 0x1f}, want: []uint32{inBase, outBase}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newConsole(0, 0)
+			c.inBase, c.outBase = inBase, outBase
+			set := fakeModes(c, tc.reported...)
+			_ = c.Close() // the flush on a zero handle fails; not inspected
+			if !slices.Equal(*set, tc.want) {
+				t.Fatalf("Close set modes %#x, want %#x", *set, tc.want)
+			}
+		})
+	}
+}
+
+// TestRestoreSerializedWithClose needs no console: a Close that starts
+// while a restore func is setting modes must wait for it, so the two never
+// set console modes at the same time.
+func TestRestoreSerializedWithClose(t *testing.T) {
+	c := newConsole(0, 0)
+	c.inBase, c.outBase = 0x1f7, 0x7
+	c.getModeFn = func(_ windows.Handle, mode *uint32) error {
+		*mode = 0 // always differs, so every restore sets
+		return nil
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var inFlight atomic.Int32
+	c.setModeFn = func(windows.Handle, uint32) error {
+		if inFlight.Add(1) > 1 {
+			t.Error("Close set a console mode while restore was setting one")
+		}
+		defer inFlight.Add(-1)
+		select {
+		case <-entered:
+		default:
+			close(entered)
+			<-release
+		}
+		return nil
+	}
+
+	restored := make(chan error, 1)
+	go func() { restored <- c.restore() }()
+	select {
+	case <-entered:
+	case <-time.After(consoleFreeWait):
+		t.Fatal("restore never set a mode")
+	}
+	closed := closeAsync(c)
+	select {
+	case <-closed:
+		close(release)
+		t.Fatal("Close returned while restore was still setting modes")
+	case <-time.After(stillRunning):
+	}
+	close(release)
+	if err := recv(t, restored, "restore"); err != nil {
+		t.Fatalf("restore = %v, want nil", err)
+	}
+	_ = recv(t, closed, "Close")
 }
 
 // echoOff turns echo off on c's input, as ssh.exe interrupted at a password

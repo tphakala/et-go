@@ -395,6 +395,39 @@ func TestRestoreSkipsUnchangedMode(t *testing.T) {
 	}
 }
 
+// TestRestoreConcurrentWithClose runs a restore func and Close at the same
+// time, many times over so the two land in both orders: restore must run
+// under the lock Close holds, so it either restores before Close or sees
+// the Console closed and returns nil, never touching a closed descriptor.
+func TestRestoreConcurrentWithClose(t *testing.T) {
+	for i := range 50 {
+		_, slave := openPTY(t)
+		c := mustConsole(t, slave)
+		restore, err := c.MakeRaw()
+		if err != nil {
+			t.Fatalf("round %d: MakeRaw: %v", i, err)
+		}
+		started := make(chan struct{})
+		restored := make(chan error, 1)
+		go func() {
+			close(started)
+			restored <- restore()
+		}()
+		<-started // start Close as restore starts, so the two overlap
+		if err := c.Close(); err != nil {
+			t.Fatalf("round %d: Close = %v, want nil", i, err)
+		}
+		select {
+		case err := <-restored:
+			if err != nil {
+				t.Fatalf("round %d: restore concurrent with Close = %v, want nil", i, err)
+			}
+		case <-time.After(waitTimeout):
+			t.Fatalf("round %d: restore never returned", i)
+		}
+	}
+}
+
 func TestCloseRestoresAndUnblocksRead(t *testing.T) {
 	_, slave := openPTY(t)
 	// A second descriptor on the same terminal to inspect it after Close.
