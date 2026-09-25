@@ -12,21 +12,33 @@ import (
 const redacted = "REDACTED"
 
 // Credentials are the session id and passkey returned by etterminal. The id is
-// not secret and stays visible for debugging; the passkey is replaced by
-// REDACTED in every rendering the type controls: fmt with any verb (Format),
-// encoding/json (MarshalJSON), text encoders such as encoding/xml
-// (MarshalText) and slog (LogValue). Those methods also run when Credentials
-// sits behind a pointer or inside an exported field, a slice or a map.
+// not secret and stays visible for debugging. The passkey sits behind an
+// unexported pointer, read with Passkey: renderings that reach it by reflection
+// (fmt of a Credentials held in an unexported field, %p, encoding/gob,
+// encoding/json of the raw fields) see only an address or nothing. Format,
+// MarshalJSON, MarshalText and LogValue add a readable form with the passkey
+// replaced by REDACTED.
 //
-// Known renderings that bypass every method and print the passkey: fmt formatting a
-// Credentials held in an unexported struct field (fmt cannot call methods on
-// it), and %p applied to a Credentials value (fmt handles %p before it looks
-// for any method, and go vet does not flag it), and encoding/gob, which encodes
-// the exported fields directly. Keep Credentials in exported fields, never
-// format it with %p, and never gob-encode it.
+// Hold Credentials in a named field, not embedded: embedding promotes Format
+// and the marshalers, so the outer struct would print and encode as the
+// credentials alone. Credentials hold a pointer, so == compares identity;
+// compare ID and Passkey() instead.
 type Credentials struct {
 	ID      string
-	Passkey string
+	passkey *string
+}
+
+// NewCredentials returns Credentials holding id and passkey.
+func NewCredentials(id, passkey string) Credentials {
+	return Credentials{ID: id, passkey: &passkey}
+}
+
+// Passkey returns the session passkey, or "" for the zero value.
+func (c Credentials) Passkey() string {
+	if c.passkey == nil {
+		return ""
+	}
+	return *c.passkey
 }
 
 // String returns the redacted form, for callers that want it as a string.
@@ -38,7 +50,7 @@ func (c Credentials) String() string {
 // prints it as a Go literal.
 func (c Credentials) Format(f fmt.State, verb rune) {
 	if verb == 'v' && f.Flag('#') {
-		_, _ = fmt.Fprint(f, `bootstrap.Credentials{ID:"`+c.ID+`", Passkey:"`+redacted+`"}`)
+		_, _ = fmt.Fprintf(f, "bootstrap.Credentials{ID:%q, Passkey:%q}", c.ID, redacted)
 		return
 	}
 	_, _ = fmt.Fprint(f, c.String())

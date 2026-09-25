@@ -171,8 +171,8 @@ func TestRunSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if got.ID != testID || got.Passkey != testPasskey {
-		t.Fatalf("Run() = %v with passkey match %v, want id %s and the fake's passkey", got, got.Passkey == testPasskey, testID)
+	if got.ID != testID || got.Passkey() != testPasskey {
+		t.Fatalf("Run() = %v with passkey match %v, want id %s and the fake's passkey", got, got.Passkey() == testPasskey, testID)
 	}
 	// The server regenerated the credentials, so there is nothing to warn about.
 	if logs.Len() != 0 {
@@ -212,7 +212,7 @@ func TestRunWarnsWhenServerDoesNotRegenerate(t *testing.T) {
 	if !strings.Contains(logs.String(), "did not regenerate") {
 		t.Fatalf("no regeneration warning logged; logs: %s", logs.String())
 	}
-	if strings.Contains(logs.String(), got.Passkey) {
+	if strings.Contains(logs.String(), got.Passkey()) {
 		t.Fatalf("warning leaks the passkey: %s", logs.String())
 	}
 }

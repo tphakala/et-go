@@ -13,11 +13,11 @@ func TestParseCredentials(t *testing.T) {
 		want    Credentials
 		wantErr string // "" means success; otherwise a substring the error must contain
 	}{
-		{"plain", "IDPASSKEY:" + testID + "/" + testPasskey + "\n", Credentials{testID, testPasskey}, ""},
-		{"crlf", "IDPASSKEY:" + testID + "/" + testPasskey + "\r\n", Credentials{testID, testPasskey}, ""},
-		{"no trailing newline", "IDPASSKEY:" + testID + "/" + testPasskey, Credentials{testID, testPasskey}, ""},
-		{"noise before", "Last login: Thu\nWelcome!\nIDPASSKEY:" + testID + "/" + testPasskey + "\n", Credentials{testID, testPasskey}, ""},
-		{"first marker wins", "IDPASSKEY:" + testID + "/" + testPasskey + "\nIDPASSKEY:zzzzzzzzzzzzzzzz/" + testPasskey, Credentials{testID, testPasskey}, ""},
+		{"plain", "IDPASSKEY:" + testID + "/" + testPasskey + "\n", NewCredentials(testID, testPasskey), ""},
+		{"crlf", "IDPASSKEY:" + testID + "/" + testPasskey + "\r\n", NewCredentials(testID, testPasskey), ""},
+		{"no trailing newline", "IDPASSKEY:" + testID + "/" + testPasskey, NewCredentials(testID, testPasskey), ""},
+		{"noise before", "Last login: Thu\nWelcome!\nIDPASSKEY:" + testID + "/" + testPasskey + "\n", NewCredentials(testID, testPasskey), ""},
+		{"first marker wins", "IDPASSKEY:" + testID + "/" + testPasskey + "\nIDPASSKEY:zzzzzzzzzzzzzzzz/" + testPasskey, NewCredentials(testID, testPasskey), ""},
 		{"no marker", "Welcome!\n", Credentials{}, "no IDPASSKEY"},
 		{"empty", "", Credentials{}, "no IDPASSKEY"},
 		{"truncated id", "IDPASSKEY:abcd", Credentials{}, "malformed id"},
@@ -35,7 +35,9 @@ func TestParseCredentials(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := parseCredentials([]byte(tt.out))
 			if tt.wantErr == "" {
-				if err != nil || got != tt.want {
+				// want's passkey is read from the field, not through Passkey,
+				// so a broken accessor cannot make both sides agree.
+				if err != nil || got.ID != tt.want.ID || got.Passkey() != *tt.want.passkey {
 					t.Fatalf("parseCredentials() = %v, %v; want %v, nil", got, err, tt.want)
 				}
 				return

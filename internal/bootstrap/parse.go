@@ -30,7 +30,7 @@ func parseCredentials(out []byte) (Credentials, error) {
 		// Do not echo the value: a malformed passkey may still be a real one.
 		return Credentials{}, fmt.Errorf("%w: malformed passkey after %q", ErrNoCredentials, marker)
 	}
-	return Credentials{ID: string(id), Passkey: string(passkey)}, nil
+	return NewCredentials(string(id), string(passkey)), nil
 }
 
 // alnumRun returns the leading run of ASCII letters and digits in b and its length.
