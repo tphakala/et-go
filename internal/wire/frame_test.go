@@ -187,3 +187,109 @@ func BenchmarkFrameRoundTrip(b *testing.B) {
 		}
 	}
 }
+
+func TestAppendFrame(t *testing.T) {
+	dst := []byte{0xee}
+	got, err := AppendFrame(dst, []byte{0xaa, 0xbb})
+	if err != nil {
+		t.Fatalf("AppendFrame: %v", err)
+	}
+	want := []byte{0xee, 0, 0, 0, 2, 0xaa, 0xbb}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("AppendFrame = % x, want % x", got, want)
+	}
+
+	got, err = AppendFrame(dst, make([]byte, MaxFrameSize+1))
+	if !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("AppendFrame(oversized) error = %v, want ErrTooLarge", err)
+	}
+	if !bytes.Equal(got, dst) {
+		t.Fatalf("AppendFrame(oversized) = % x, want dst unchanged", got)
+	}
+}
+
+// A writer that reports a short count without an error must not silently
+// truncate the frame.
+func TestWriteFrameShortWrite(t *testing.T) {
+	if err := WriteFrame(shortWriter{}, []byte("hello")); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("WriteFrame = %v, want io.ErrShortWrite", err)
+	}
+}
+
+// A reader that returns the first bytes of a length together with a wrapped
+// io.EOF has cut the stream mid-header: that is not a clean end. With no
+// byte read at all, the same wrapped io.EOF is a clean end, reported as a
+// plain io.EOF.
+func TestReadFrameWrappedEOF(t *testing.T) {
+	tests := []struct {
+		name  string
+		in    []byte
+		clean bool
+	}{
+		{name: "nothing read", in: nil, clean: true},
+		{name: "partial length", in: []byte{0, 0}},
+		{name: "partial body", in: []byte{0, 0, 0, 5, 'a'}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ReadFrame(&wrappedEOFReader{data: tt.in}, nil)
+			if tt.clean {
+				if err != io.EOF { //nolint:errorlint // a clean end must be the plain sentinel
+					t.Fatalf("ReadFrame = %v, want plain io.EOF", err)
+				}
+				return
+			}
+			if !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("ReadFrame = %v, want io.ErrUnexpectedEOF", err)
+			}
+		})
+	}
+}
+
+// A peer that declares a large frame and sends only a few bytes must not
+// make ReadFrame allocate the declared length up front.
+func TestReadFrameGrowsWithData(t *testing.T) {
+	in := []byte("\x01\x00\x00\x00only ten b") // 16 MiB declared, 10 bytes sent
+	var err error
+	got := allocatedBytes(func() {
+		_, err = ReadFrame(bytes.NewReader(in), nil)
+	})
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("ReadFrame = %v, want io.ErrUnexpectedEOF", err)
+	}
+	if got > 1<<20 {
+		t.Fatalf("ReadFrame allocated %d bytes for a 10-byte body, want under 1 MiB", got)
+	}
+}
+
+// ReadFrame into a buffer that is large enough, and AppendFrame into one,
+// allocate nothing: etcp's read and write loops run them for every packet.
+func TestFrameSteadyStateAllocs(t *testing.T) {
+	var enc bytes.Buffer
+	if err := WriteFrame(&enc, make([]byte, 1024)); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+	data := enc.Bytes()
+	r := bytes.NewReader(data)
+	buf := make([]byte, 0, 2048)
+	if n := testing.AllocsPerRun(100, func() {
+		r.Reset(data)
+		var err error
+		if buf, err = ReadFrame(r, buf); err != nil {
+			t.Fatalf("ReadFrame: %v", err)
+		}
+	}); n != 0 {
+		t.Errorf("ReadFrame with a reused buffer: %v allocs, want 0", n)
+	}
+
+	frame := make([]byte, 1024)
+	out := make([]byte, 0, 2048)
+	if n := testing.AllocsPerRun(100, func() {
+		var err error
+		if out, err = AppendFrame(out[:0], frame); err != nil {
+			t.Fatalf("AppendFrame: %v", err)
+		}
+	}); n != 0 {
+		t.Errorf("AppendFrame into a reused buffer: %v allocs, want 0", n)
+	}
+}
