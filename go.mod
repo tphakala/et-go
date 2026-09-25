@@ -3,7 +3,7 @@ module github.com/tphakala/et-go
 go 1.27.0
 
 require (
-	github.com/creack/pty v1.1.24
+	github.com/creack/pty v1.1.24 // test-only: imported by test/e2e under the e2e build tag
 	github.com/quasilyte/go-ruleguard/dsl v0.3.23
 	golang.org/x/crypto v0.57.0
 	golang.org/x/sys v0.48.0

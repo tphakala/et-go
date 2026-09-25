@@ -123,6 +123,7 @@ type term struct {
 	out    bytes.Buffer
 	notify chan struct{}
 	done   chan error
+	wg     sync.WaitGroup
 }
 
 func startET(t *testing.T, bin string, args ...string) *term {
@@ -138,7 +139,7 @@ func startET(t *testing.T, bin string, args ...string) *term {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go func() {
+	tm.wg.Go(func() {
 		buf := make([]byte, 32<<10)
 		for {
 			n, err := f.Read(buf)
@@ -157,11 +158,12 @@ func startET(t *testing.T, bin string, args ...string) *term {
 				return
 			}
 		}
-	}()
-	go func() { tm.done <- cmd.Wait() }()
+	})
+	tm.wg.Go(func() { tm.done <- cmd.Wait() })
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
 		_ = f.Close()
+		tm.wg.Wait()
 	})
 	return tm
 }
