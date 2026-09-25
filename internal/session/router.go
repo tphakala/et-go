@@ -35,8 +35,13 @@ type group struct {
 }
 
 // Go runs f in a new goroutine owned by the group.
-func (g *group) Go(f func() error) {
-	g.wg.Go(func() {
+func (g *group) Go(f func() error) { g.goIn(&g.wg, f) }
+
+// goIn runs f like Go but tracks it in wg instead of the group's own
+// WaitGroup, for a goroutine Run may have to stop waiting for. Its error
+// still cancels the session.
+func (g *group) goIn(wg *sync.WaitGroup, f func() error) {
+	wg.Go(func() {
 		if err := f(); err != nil {
 			g.cancel(err)
 		}

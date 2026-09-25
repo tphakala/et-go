@@ -66,8 +66,6 @@ func (f *fakeTransport) WritePacket(ctx context.Context, p protocol.Packet) erro
 }
 
 // pause blocks WritePacket until release is called.
-//
-//nolint:unused // consumed by task 4's terminal service tests
 func (f *fakeTransport) pause() (release func()) {
 	gate := make(chan struct{})
 	f.mu.Lock()
@@ -95,8 +93,6 @@ func (f *fakeTransport) sentWith(h protocol.Header) []protocol.Packet {
 }
 
 // sentInput concatenates the keyboard bytes written in TERMINAL_BUFFER packets.
-//
-//nolint:unused // consumed by task 4's terminal service tests
 func (f *fakeTransport) sentInput(t *testing.T) []byte {
 	t.Helper()
 	var all bytes.Buffer
@@ -107,8 +103,6 @@ func (f *fakeTransport) sentInput(t *testing.T) []byte {
 }
 
 // sentSizes decodes the TERMINAL_INFO packets written so far.
-//
-//nolint:unused // consumed by task 4's terminal service tests
 func (f *fakeTransport) sentSizes(t *testing.T) []console.Size {
 	t.Helper()
 	infos := f.sentWith(protocol.HeaderTerminalInfo)
@@ -126,7 +120,6 @@ func (f *fakeTransport) sentSizes(t *testing.T) []console.Size {
 	return out
 }
 
-//nolint:unused // consumed by task 4's terminal service tests
 func decodeBuffer(t *testing.T, p protocol.Packet) []byte {
 	t.Helper()
 	tb := &protocol.TerminalBuffer{}
@@ -149,8 +142,6 @@ func serverOutput(t *testing.T, s string) protocol.Packet {
 }
 
 // exitStatus builds a TERMINAL_EXIT_STATUS packet.
-//
-//nolint:unused // consumed by task 4's terminal service tests
 func exitStatus(t *testing.T, code int32) protocol.Packet {
 	t.Helper()
 	st := &protocol.TerminalExitStatus{}
@@ -162,13 +153,10 @@ func exitStatus(t *testing.T, code int32) protocol.Packet {
 	return protocol.Packet{Header: protocol.HeaderTerminalExitStatus, Payload: b}
 }
 
-//nolint:unused // consumed by task 4's terminal service tests
 var errFakeClosed = errors.New("fake terminal: closed")
 
 // fakeTerminal is a scripted local terminal. Keyboard input is fed through
 // type, size changes through resize; everything written is kept in out.
-//
-//nolint:unused // consumed by task 4's terminal service tests
 type fakeTerminal struct {
 	keys    chan []byte
 	sizes   chan console.Size
@@ -181,7 +169,6 @@ type fakeTerminal struct {
 	out bytes.Buffer
 }
 
-//nolint:unused // consumed by task 4's terminal service tests
 func newFakeTerminal(size console.Size) *fakeTerminal {
 	return &fakeTerminal{
 		keys:   make(chan []byte),
@@ -191,7 +178,6 @@ func newFakeTerminal(size console.Size) *fakeTerminal {
 	}
 }
 
-//nolint:unused // consumed by task 4's terminal service tests
 func (f *fakeTerminal) Read(p []byte) (int, error) {
 	if len(f.rest) == 0 {
 		select {
@@ -209,7 +195,6 @@ func (f *fakeTerminal) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-//nolint:unused // consumed by task 4's terminal service tests
 func (f *fakeTerminal) Write(p []byte) (int, error) {
 	select {
 	case <-f.closed:
@@ -221,16 +206,13 @@ func (f *fakeTerminal) Write(p []byte) (int, error) {
 	return f.out.Write(p)
 }
 
-//nolint:unused // consumed by task 4's terminal service tests
 func (f *fakeTerminal) Close() error {
 	f.closeMu.Do(func() { close(f.closed) })
 	return nil
 }
 
-//nolint:unused // consumed by task 4's terminal service tests
 func (f *fakeTerminal) Size() (console.Size, error) { return f.size, nil }
 
-//nolint:unused // consumed by task 4's terminal service tests
 func (f *fakeTerminal) Resizes(ctx context.Context) iter.Seq[console.Size] {
 	return func(yield func(console.Size) bool) {
 		for {
@@ -247,18 +229,14 @@ func (f *fakeTerminal) Resizes(ctx context.Context) iter.Seq[console.Size] {
 }
 
 // typeKeys feeds keyboard input; it blocks until the reader takes it.
-//
-//nolint:unused // consumed by task 4's terminal service tests
 func (f *fakeTerminal) typeKeys(s string) { f.keys <- []byte(s) }
 
-//nolint:unused // consumed by task 4's terminal service tests
 func (f *fakeTerminal) output() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.out.String()
 }
 
-//nolint:unused // consumed by task 4's terminal service tests
 func (f *fakeTerminal) isClosed() bool {
 	select {
 	case <-f.closed:
