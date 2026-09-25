@@ -217,6 +217,21 @@ func TestRunWarnsWhenServerDoesNotRegenerate(t *testing.T) {
 	}
 }
 
+// TestRunNilLoggerOnWarningPath pins the documented nil-Logger default on the
+// only path that logs.
+func TestRunNilLoggerOnWarningPath(t *testing.T) {
+	cfg, _ := useFakeSSH(t, "echo-sent")
+	cfg.Logger = nil
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Run() with a nil Logger panicked on the no-regeneration warning: %v", r)
+		}
+	}()
+	if _, err := Run(t.Context(), cfg); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
 func TestRunFailures(t *testing.T) {
 	const (
 		missingHint = "--terminal-path"
