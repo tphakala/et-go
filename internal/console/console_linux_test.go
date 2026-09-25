@@ -442,15 +442,22 @@ func TestCloseReportsRestoreError(t *testing.T) {
 	if err := c.Close(); !errors.Is(err, errSet) {
 		t.Fatalf("Close = %v, want an error wrapping the failed restore", err)
 	}
+	// The failed restore must not stop Close from closing the terminal.
+	if _, err := c.Write([]byte("x")); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("Write after a Close whose restore failed = %v, want an error wrapping os.ErrClosed", err)
+	}
 	if err := c.Close(); err != nil {
 		t.Fatalf("second Close = %v, want nil", err)
 	}
 }
 
 // TestSizeConcurrentWithClose runs Size in a loop while Close runs, many
-// times over: every error Size returns must wrap os.ErrClosed. Size reads
-// the terminal under the lock Close holds, so it never sees a descriptor
-// that is being closed.
+// times over: every error Size returns must wrap os.ErrClosed. Under -race
+// it catches a Size that reads the closed flag without the lock (a data
+// race on it). A Size that takes the lock for the check but drops it
+// before its ioctl is caught only when the ioctl happens to land after the
+// descriptor closed ("use of closed file"), so that shape is caught
+// probabilistically, not on every run.
 func TestSizeConcurrentWithClose(t *testing.T) {
 	for i := range 50 {
 		_, slave := openPTY(t)
