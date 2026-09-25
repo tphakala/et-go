@@ -97,6 +97,11 @@ func (c *Conn) readLoop(ctx context.Context, l *link, r io.Reader, catchup [][]b
 // upstream treats a failed decrypt as fatal too
 // (src/base/CryptoHandler.cpp:40-42 at et-v7.0.0).
 func (c *Conn) deliver(ctx context.Context, l *link, b []byte) error {
+	// Live frames are bounded by wire.ReadFrame; catchup entries arrive in
+	// one handshake message, so bound them here to the same limit.
+	if len(b) > wire.MaxFrameSize {
+		return c.fail(fmt.Errorf("%w: packet of %d bytes: %w", ErrIntegrity, len(b), wire.ErrTooLarge))
+	}
 	encrypted, h, payload, err := wire.ParsePacket(b)
 	if err != nil {
 		return c.fail(fmt.Errorf("%w: %w", ErrIntegrity, err))
@@ -220,7 +225,7 @@ func (c *Conn) watch(ctx context.Context, l *link) error {
 			case probed:
 				return errLinkDead
 			default:
-				c.enqueue(c.probe)
+				c.probeOnce()
 				probed = true
 			}
 		}

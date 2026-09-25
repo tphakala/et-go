@@ -42,6 +42,8 @@ type Conn struct {
 	ring    ring
 	flushed int64 // next sequence number the current link writer sends
 	unsent  int   // bytes of entries at or after flushed
+	// lastProbe is the sequence number of the latest probe, or -1.
+	lastProbe int64
 
 	// in and recvSeq belong to whichever goroutine reads: a link reader, the
 	// supervisor during recovery, or Dial's caller during a first-connect
@@ -164,10 +166,18 @@ func (c *Conn) sealedNone() bool {
 	return c.ring.next() == 0
 }
 
-// enqueue queues p regardless of the backlog limit; used for liveness probes.
-func (c *Conn) enqueue(p protocol.Packet) {
+// probeOnce queues the liveness probe regardless of the backlog limit,
+// unless an earlier probe is still unwritten: that one draws the same
+// answer, and since probes bypass ReplayLimit, one per quiet keepAlive
+// period behind a stuck writer would grow the ring without bound.
+func (c *Conn) probeOnce() {
 	c.mu.Lock()
-	c.enqueueLocked(p)
+	if c.lastProbe >= c.flushed {
+		c.mu.Unlock()
+		return
+	}
+	c.lastProbe = c.ring.next()
+	c.enqueueLocked(c.probe)
 	c.mu.Unlock()
 	signal(c.wake)
 }

@@ -8,6 +8,10 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/tphakala/et-go/internal/protocol"
+	"github.com/tphakala/et-go/internal/seal"
+	"github.com/tphakala/et-go/internal/wire"
 )
 
 // shortWriter reports one byte less than it was given and no error, which
@@ -39,6 +43,26 @@ func TestWriteLoopShortWrite(t *testing.T) {
 			t.Fatalf("flushed = %d after a short write, want 0", c.flushed)
 		}
 	})
+}
+
+// A packet larger than any frame the stream allows ends the Conn with
+// ErrIntegrity even when it authenticates: catchup entries arrive inside one
+// handshake message, so they must not bypass the frame limit that
+// wire.ReadFrame applies to live frames. (Called directly: pushing a 16 MiB
+// catchup through the fake network takes minutes under the race detector.)
+func TestDeliverRefusesOversizedPacket(t *testing.T) {
+	var d Dialer
+	c := d.newConn("et.example:2022", "XXXtestclient001", strings.Repeat("k", 32))
+	defer c.cancel(nil)
+	var key [32]byte
+	copy(key[:], strings.Repeat("k", 32))
+	sealed := seal.New(&key, seal.ServerToClient).Seal(nil, make([]byte, wire.MaxFrameSize))
+	b := wire.AppendPacket(nil, true, protocol.HeaderTerminalBuffer, sealed)
+
+	err := c.deliver(t.Context(), &link{alive: make(chan struct{}, 1)}, b)
+	if !errors.Is(err, ErrIntegrity) {
+		t.Fatalf("deliver(%d-byte packet) = %v, want ErrIntegrity", len(b), err)
+	}
 }
 
 // backlogWriter accepts its first Write, during which the caller fills the

@@ -11,7 +11,62 @@ import (
 	"github.com/tphakala/et-go/internal/etservertest"
 	"github.com/tphakala/et-go/internal/protocol"
 	"github.com/tphakala/et-go/internal/wire"
+	"golang.org/x/crypto/nacl/secretbox"
 )
+
+// A probe still waiting to be written is not followed by another: probes
+// bypass ReplayLimit, so while the writer is stuck on a server that has
+// stopped reading, a new probe every quiet keepAlive period (the server's
+// occasional output keeps the link from being declared dead) would grow the
+// replay ring without bound.
+func TestProbesDoNotPileUpBehindStuckWriter(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := &scripted{handle: func(i int, c *rawServer) {
+			if i > 0 || c.respond(protocol.ConnectStatus_NEW_CLIENT) != nil {
+				return
+			}
+			if _, err := wire.ReadFrame(c.br, nil); err != nil { // packet 0
+				return
+			}
+			// Stop reading, but send a little output just slower than
+			// the keepalive period.
+			for {
+				time.Sleep(6 * time.Second)
+				sealed := c.out.Seal(nil, []byte("x"))
+				if wire.WriteFrame(c.conn, wire.AppendPacket(nil, true, protocol.HeaderTerminalBuffer, sealed)) != nil {
+					return
+				}
+			}
+		}}
+		d := etcp.Dialer{NetDialer: s}
+		conn, err := d.Dial(t.Context(), testAddr, testID, testKey)
+		if err != nil {
+			t.Fatalf("Dial: %v", err)
+		}
+		done := make(chan struct{})
+		defer func() {
+			_ = conn.Close()
+			<-done
+			s.wg.Wait()
+		}()
+		go func() { // the caller keeps reading
+			defer close(done)
+			for {
+				if _, err := conn.ReadPacket(t.Context()); err != nil {
+					return
+				}
+			}
+		}()
+		if err := conn.WritePacket(t.Context(), numbered(0, 10)); err != nil {
+			t.Fatalf("WritePacket: %v", err)
+		}
+		time.Sleep(20 * time.Minute)
+		// One probe, sealed with an empty payload, may wait unwritten.
+		if got, want := etcp.Unsent(conn), 2+secretbox.Overhead; got > want {
+			t.Fatalf("unsent = %d bytes after 20 minutes behind a stuck writer, want at most %d (one probe)", got, want)
+		}
+	})
+}
 
 // etserver 7.0.0 aborts the whole server when a session's first packet is not
 // INITIAL_PAYLOAD (src/terminal/TerminalServer.cpp:429-439 at et-v7.0.0), so
