@@ -57,15 +57,21 @@ type Conn struct {
 // not when it is sent. It blocks only when the unsent backlog exceeds
 // ReplayLimit, until a link drains it, ctx ends or the Conn fails. A payload
 // too large for one sealed frame (just under wire.MaxFrameSize) is refused
-// with an error wrapping wire.ErrTooLarge.
+// with an error wrapping wire.ErrTooLarge. A ctx already done on entry is
+// refused; one that ends while the write is blocked returns its cause, unless
+// the write was woken for room at the same moment, in which case it may still
+// be queued, as a net.Conn write racing its deadline may complete.
 func (c *Conn) WritePacket(ctx context.Context, p protocol.Packet) error {
 	if len(p.Payload) > maxPayload {
 		return fmt.Errorf("etcp: packet payload of %d bytes: %w", len(p.Payload), wire.ErrTooLarge)
 	}
+	// ctx is checked here and in the select below, never between waking on
+	// c.space and the room check: a writer that took the wakeup and then
+	// returned would leave the next blocked writer parked with room available.
+	if err := ctx.Err(); err != nil {
+		return context.Cause(ctx)
+	}
 	for {
-		if err := ctx.Err(); err != nil {
-			return context.Cause(ctx)
-		}
 		if c.ctx.Err() != nil {
 			return context.Cause(c.ctx)
 		}
