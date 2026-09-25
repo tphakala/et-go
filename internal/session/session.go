@@ -75,8 +75,6 @@ const MaxInputPacket = 64 << 10
 const startTimeout = 5 * time.Second
 
 // errEnded is the internal cause for a normal end without an exit status.
-//
-//nolint:unused // consumed by task 3's router
 var errEnded = errors.New("session: ended by server")
 
 // Start sends INITIAL_PAYLOAD built from opts and waits for INITIAL_RESPONSE.
