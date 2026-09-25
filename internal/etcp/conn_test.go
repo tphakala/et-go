@@ -79,19 +79,23 @@ func TestDialErrors(t *testing.T) {
 	}
 }
 
-// Options that cannot work are refused before dialing: a negative KeepAlive
-// fires the watcher at once and redials forever, a negative ReplayLimit
-// blocks every write, and a limit above upstream's 64 MiB lets a catchup
-// outgrow what etserver accepts.
+// Options outside their documented range are refused before dialing: a
+// negative KeepAlive fires the watcher at once and redials forever, a
+// negative ReplayLimit blocks every write, and a ReplayLimit above
+// upstream's 64 MiB is refused as documented. The boundary values themselves
+// are accepted.
 func TestDialRejectsBadOptions(t *testing.T) {
 	tests := []struct {
 		name string
 		d    etcp.Dialer
+		ok   bool // the boundary values themselves are accepted
 	}{
 		{name: "negative KeepAlive", d: etcp.Dialer{KeepAlive: -time.Second}},
 		{name: "tiny KeepAlive", d: etcp.Dialer{KeepAlive: time.Nanosecond}},
+		{name: "KeepAlive at its minimum", d: etcp.Dialer{KeepAlive: 100 * time.Millisecond}, ok: true},
 		{name: "negative ReplayLimit", d: etcp.Dialer{ReplayLimit: -1}},
 		{name: "ReplayLimit above 64 MiB", d: etcp.Dialer{ReplayLimit: 64<<20 + 1}},
+		{name: "ReplayLimit at 64 MiB", d: etcp.Dialer{ReplayLimit: 64 << 20}, ok: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -108,6 +112,12 @@ func TestDialRejectsBadOptions(t *testing.T) {
 					_ = conn.Close()
 				}
 				s.wg.Wait()
+				if tt.ok {
+					if err != nil {
+						t.Fatalf("Dial = %v; want the boundary value accepted", err)
+					}
+					return
+				}
 				if err == nil || s.dials.Load() != 0 {
 					t.Fatalf("Dial = %v after %d dials; want an error before dialing", err, s.dials.Load())
 				}
@@ -241,8 +251,9 @@ func TestReconnectSurvivesCutsAnywhere(t *testing.T) {
 				if err := expectNumbered(ctx, 20, h.conn.ReadPacket); err != nil {
 					t.Fatalf("client side: %v", err)
 				}
-				// The initial link, the one CutAll ends, and the one after
-				// the budgeted cut: fewer means the cut never landed.
+				// The initial link (which CutAll ends), the budgeted link the
+				// cut ends, and the one after it: fewer than three dials means
+				// the budgeted cut never landed.
 				if got := h.net.Dials(); got < 3 {
 					t.Fatalf("Dials() = %d, want at least 3: the cut after %d bytes never fired", got, n)
 				}

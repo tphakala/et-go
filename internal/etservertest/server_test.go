@@ -2,6 +2,7 @@ package etservertest_test
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"net"
 	"testing"
@@ -159,6 +160,9 @@ func TestServerRecoverWritesCatchupFirst(t *testing.T) {
 		defer n.Close()
 
 		connect(t, n, testID, protocol.Version) // registers the client
+		// Let the first link's Serve take over before the second connects:
+		// otherwise its late takeOver can close the second link.
+		synctest.Wait()
 		if err := srv.Send(t.Context(), protocol.Packet{Header: protocol.HeaderTerminalBuffer, Payload: []byte("owed")}); err != nil {
 			t.Fatalf("Send: %v", err)
 		}
@@ -207,6 +211,22 @@ func TestServerEndSessionFlushesThenCloses(t *testing.T) {
 		}
 		if _, err := wire.ReadFrame(c.br, nil); err == nil {
 			t.Fatal("link still open after EndSession")
+		}
+	})
+}
+
+// A dial whose context has already ended fails the way net.Dialer does: a
+// *net.OpError wrapping the context's error.
+func TestNetworkDialEndedContext(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		n := etservertest.NewNetwork(etservertest.NewServer(testID, testKey))
+		defer n.Close()
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		_, err := n.DialContext(ctx, "tcp", "et:2022")
+		if _, ok := errors.AsType[*net.OpError](err); !ok || !errors.Is(err, context.Canceled) {
+			t.Fatalf("dial with an ended context = %v, want a *net.OpError wrapping context.Canceled", err)
 		}
 	})
 }

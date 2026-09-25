@@ -83,7 +83,11 @@ func TestWakeupNotLostOnCancel(t *testing.T) {
 
 			makeRoom(c) // A is handed the wakeup
 			cancelA()   // and is cancelled before it gets to run
-			<-doneA     // A may enqueue or return its cause; either is fine
+			select {    // A may enqueue or return its cause; either is fine
+			case <-doneA:
+			case <-time.After(time.Minute):
+				t.Fatal("writer A still blocked a minute after it was cancelled")
+			}
 			waitWrite(t, "B", doneB)
 		})
 	}

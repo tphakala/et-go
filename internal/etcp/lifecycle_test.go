@@ -47,17 +47,15 @@ func TestBackoffResetsAfterLongLink(t *testing.T) {
 		clock.mu.Lock()
 		before := len(clock.times)
 		clock.mu.Unlock()
-		cutAt := time.Now()
 		nw.CutAll()
+		// No fake time passes in synctest.Wait, so a redial seen here
+		// happened at the moment of the cut, with no backoff delay.
 		synctest.Wait()
 
 		clock.mu.Lock()
 		defer clock.mu.Unlock()
 		if len(clock.times) <= before {
-			t.Fatal("no redial after the long-lived link was cut")
-		}
-		if gap := clock.times[before].Sub(cutAt); gap != 0 {
-			t.Fatalf("redial came %v after the cut, want at once: the backoff was not reset", gap)
+			t.Fatal("no immediate redial after the long-lived link was cut: the backoff was not reset")
 		}
 	})
 }

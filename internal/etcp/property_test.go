@@ -79,18 +79,29 @@ func runProperty(t *testing.T, seed uint64) {
 	cancel()
 	wg.Wait()
 
-	// expectNumbered stops at packet n-1, so a replay that delivers a packet
-	// again after the last one would pass it. With the traffic and the cuts
-	// over, let any late reconnect finish, then nothing but keepalives may
-	// still be pending on either side.
-	synctest.Sleep(time.Minute)
-	if err := expectNothingMore(t.Context(), h.srv.Recv); err != nil {
-		t.Errorf("server side: %v", err)
-	}
-	if err := expectNothingMore(t.Context(), h.conn.ReadPacket); err != nil {
-		t.Errorf("client side: %v", err)
-	}
 	if got := h.net.Dials(); got < 2 {
 		t.Errorf("Dials() = %d: no cut forced a reconnect, so the run proved nothing", got)
+	}
+
+	// expectNumbered stops at packet n-1, so a recover after the last packet
+	// is otherwise never exercised. Force one now that both sides hold
+	// everything: it must replay nothing (a resent packet would surface as a
+	// duplicate or, with counter nonces, as an integrity error) and must
+	// settle, with no further redial across the quiet minute.
+	beforeCut := h.net.Dials()
+	h.net.CutAll()
+	synctest.Sleep(time.Minute)
+	settled := h.net.Dials()
+	if settled == beforeCut {
+		t.Errorf("the late cut forced no reconnect (Dials() stayed %d)", settled)
+	}
+	if err := expectNothingMore(t.Context(), h.srv.Recv); err != nil {
+		t.Errorf("server side after the late recover: %v", err)
+	}
+	if err := expectNothingMore(t.Context(), h.conn.ReadPacket); err != nil {
+		t.Errorf("client side after the late recover: %v", err)
+	}
+	if got := h.net.Dials(); got != settled {
+		t.Errorf("Dials() went from %d to %d with no traffic and no cuts: a redial loop", settled, got)
 	}
 }

@@ -49,6 +49,52 @@ func TestIdleConnSlowSteadyPeer(t *testing.T) {
 	})
 }
 
+// Write progress also keeps a blocked read alive: in the recover exchange
+// the reader may wait for the peer's catchup while our own catchup is still
+// flowing out. A read that outlasts the idle timeout must not fail while
+// writes progress, and must fail once they stop.
+func TestIdleConnWriteProgressKeepsReadAlive(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client, server := net.Pipe()
+		defer func() { _ = client.Close() }()
+		defer func() { _ = server.Close() }()
+
+		ic := idleConn{Conn: client, timeout: handshakeIdle}
+		readErr := make(chan error, 1)
+		go func() {
+			_, err := io.ReadFull(ic, make([]byte, 1)) // the peer never writes
+			readErr <- err
+		}()
+		go func() { // the peer drains 8 KiB/s
+			buf := make([]byte, 8<<10)
+			for {
+				if _, err := server.Read(buf); err != nil {
+					return
+				}
+				time.Sleep(time.Second)
+			}
+		}()
+
+		const total = 512 << 10 // 64 s at 8 KiB/s, past the 30 s timeout
+		if _, err := ic.Write(make([]byte, total)); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		select {
+		case err := <-readErr:
+			t.Fatalf("read failed with %v while writes were still progressing", err)
+		default:
+		}
+		select {
+		case err := <-readErr:
+			if !errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Fatalf("read error = %v, want os.ErrDeadlineExceeded once writes stop", err)
+			}
+		case <-time.After(time.Minute):
+			t.Fatal("read never timed out after writes stopped")
+		}
+	})
+}
+
 func TestIdleConnStalledPeer(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		client, server := net.Pipe()

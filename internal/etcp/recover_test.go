@@ -169,13 +169,16 @@ func TestOversizedCatchupIsFatal(t *testing.T) {
 			_ = conn.Close()
 			s.wg.Wait()
 		}()
-		for i := range 8 { // about 8 KiB of catchup against a 1 KiB limit
+		var releaseOnce sync.Once
+		releaseServer := func() { releaseOnce.Do(func() { close(release) }) }
+		defer releaseServer() // runs first, so an early failure cannot strand s.wg.Wait
+		for i := range 8 {    // about 8 KiB of catchup against a 1 KiB limit
 			if err := conn.WritePacket(t.Context(), numbered(i, 1024)); err != nil {
 				t.Fatalf("WritePacket: %v", err)
 			}
 		}
 		synctest.Wait()
-		close(release)
+		releaseServer()
 
 		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 		defer cancel()
