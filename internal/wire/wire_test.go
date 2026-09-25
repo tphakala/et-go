@@ -31,6 +31,17 @@ type countingWriter struct {
 	calls int
 }
 
+// lenWriter counts the bytes written to it without keeping them, for tests
+// that write messages too large to buffer twice.
+type lenWriter struct {
+	n int
+}
+
+func (w *lenWriter) Write(p []byte) (int, error) {
+	w.n += len(p)
+	return len(p), nil
+}
+
 func (w *countingWriter) Write(p []byte) (int, error) {
 	w.calls++
 	return w.buf.Write(p)

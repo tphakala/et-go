@@ -39,6 +39,9 @@ func TestHeaderString(t *testing.T) {
 	}{
 		{HeaderKeepAlive, "KeepAlive"},
 		{HeaderTerminalBuffer, "TerminalBuffer"},
+		{HeaderTerminalInfo, "TerminalInfo"},
+		{HeaderTerminalClose, "TerminalClose"},
+		{HeaderTerminalExitStatus, "TerminalExitStatus"},
 		{HeaderInitialPayload, "InitialPayload"},
 		{Header(99), "Header(99)"},
 	}

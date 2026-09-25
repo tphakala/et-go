@@ -231,6 +231,53 @@ func TestOpenOutOfOrder(t *testing.T) {
 	}
 }
 
+// TestOpenFailureAdvancesNonce pins the documented contract that a failed
+// Open still consumes its nonce: after rejecting a tampered first box, the
+// Stream is at the second position, so the genuine second box opens.
+func TestOpenFailureAdvancesNonce(t *testing.T) {
+	sealer := New(&testKey, ClientToServer)
+	first := sealer.Seal(nil, []byte("first"))
+	second := sealer.Seal(nil, []byte("second"))
+	tampered := bytes.Clone(first)
+	tampered[0] ^= 1
+
+	opener := New(&testKey, ClientToServer)
+	if out, err := opener.Open(nil, tampered); !errors.Is(err, ErrOpen) || out != nil {
+		t.Fatalf("Open(tampered) = %q, %v; want nil, ErrOpen", out, err)
+	}
+	got, err := opener.Open(nil, second)
+	if err != nil || string(got) != "second" {
+		t.Fatalf("Open(second) after a failure = %q, %v; want %q, nil", got, err, "second")
+	}
+}
+
+// FuzzOpen feeds arbitrary boxes to Open at the first stream position. Open
+// must never panic, must return exactly the sealed plaintext for the genuine
+// box, and must return (nil, ErrOpen) for anything else.
+func FuzzOpen(f *testing.F) {
+	plaintext := []byte("fuzz plaintext")
+	genuine := New(&testKey, ServerToClient).Seal(nil, plaintext)
+	f.Add(genuine)
+	f.Add(genuine[:len(genuine)-1])
+	f.Add(genuine[:16])
+	f.Add([]byte{})
+	flipped := bytes.Clone(genuine)
+	flipped[len(flipped)-1] ^= 0x80
+	f.Add(flipped)
+	f.Fuzz(func(t *testing.T, box []byte) {
+		got, err := New(&testKey, ServerToClient).Open(nil, box)
+		if bytes.Equal(box, genuine) {
+			if err != nil || !bytes.Equal(got, plaintext) {
+				t.Fatalf("Open(genuine) = %q, %v; want %q, nil", got, err, plaintext)
+			}
+			return
+		}
+		if !errors.Is(err, ErrOpen) || got != nil {
+			t.Fatalf("Open(non-genuine % x) = %q, %v; want nil, ErrOpen", box, got, err)
+		}
+	})
+}
+
 func TestSealAppendsToDst(t *testing.T) {
 	prefix := []byte("hdr")
 	out := New(&testKey, ClientToServer).Seal(prefix, []byte("x"))

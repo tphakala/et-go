@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/tphakala/et-go/internal/protocol"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestMessageRoundTrip(t *testing.T) {
@@ -117,7 +118,10 @@ func TestReadMessageTruncated(t *testing.T) {
 // returns io.ErrUnexpectedEOF, not ErrTooLarge: the length itself is
 // within bounds. This pins the limit check at "greater than," not "greater
 // than or equal": sabotaging ReadMessage's check to >= would reject this
-// length outright and return ErrTooLarge instead.
+// length outright and return ErrTooLarge instead. The missing body is
+// deliberate: the limit check runs before any body byte is read, so the
+// header alone decides between the two errors, and a complete valid message
+// at this size would cost hundreds of MiB per run for no extra coverage.
 func TestReadMessageSizeBoundary(t *testing.T) {
 	var hdr [8]byte
 	binary.LittleEndian.PutUint64(hdr[:], uint64(MaxMessageSize))
@@ -177,8 +181,23 @@ func FuzzReadMessage(f *testing.F) {
 	f.Add([]byte{3, 0, 0, 0, 0, 0, 0, 0, 0x08, 0xac, 0x02})
 	f.Add(make([]byte, 8))
 	f.Add([]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
+	// A CatchupBuffer holding one entry "x": field 1, length 1.
+	f.Add([]byte{3, 0, 0, 0, 0, 0, 0, 0, 0x0a, 0x01, 'x'})
 	f.Fuzz(func(t *testing.T, in []byte) {
 		var cb protocol.CatchupBuffer
-		_ = ReadMessage(bytes.NewReader(in), &cb)
+		if err := ReadMessage(bytes.NewReader(in), &cb); err != nil {
+			return
+		}
+		// Success means in holds an 8-byte length and at least that many
+		// body bytes, and the result must equal decoding that body
+		// directly.
+		n := binary.LittleEndian.Uint64(in[:8])
+		var want protocol.CatchupBuffer
+		if err := proto.Unmarshal(in[8:8+n], &want); err != nil {
+			t.Fatalf("ReadMessage accepted a body proto.Unmarshal rejects: %v", err)
+		}
+		if !proto.Equal(&cb, &want) {
+			t.Fatalf("ReadMessage decoded %v, direct decode of the body gives %v", &cb, &want)
+		}
 	})
 }
