@@ -39,7 +39,7 @@ type localConsole interface {
 // env holds run's side-effecting dependencies, so tests can replace them.
 type env struct {
 	bootstrap   func(ctx context.Context, cfg bootstrap.Config) (bootstrap.Credentials, error)
-	resolveHost func(ctx context.Context, user, host string) string
+	resolveHost func(ctx context.Context, user, host string, opts []string) string
 	dial        func(ctx context.Context, d *etcp.Dialer, addr string, creds bootstrap.Credentials) (sessionConn, error)
 	openConsole func() (localConsole, error)
 	getenv      func(string) string
@@ -49,8 +49,8 @@ type env struct {
 func defaultEnv() env {
 	return env{
 		bootstrap: bootstrap.Run,
-		resolveHost: func(ctx context.Context, user, host string) string {
-			return resolveHost(ctx, "ssh", user, host)
+		resolveHost: func(ctx context.Context, user, host string, opts []string) string {
+			return resolveHost(ctx, "ssh", user, host, opts)
 		},
 		dial: func(ctx context.Context, d *etcp.Dialer, addr string, creds bootstrap.Credentials) (sessionConn, error) {
 			c, err := d.Dial(ctx, addr, creds.ID, creds.Passkey())
@@ -135,7 +135,7 @@ func connect(ctx context.Context, o *options, e env, log *slog.Logger) error {
 	}
 	log.Info("etterminal started", "credentials", creds)
 
-	addr := net.JoinHostPort(e.resolveHost(ctx, o.dest.User, o.dest.Host), strconv.Itoa(o.dest.Port))
+	addr := net.JoinHostPort(e.resolveHost(ctx, o.dest.User, o.dest.Host, o.sshOptions), strconv.Itoa(o.dest.Port))
 	d := &etcp.Dialer{
 		KeepAlive: o.keepAlive,
 		Probe:     protocol.Packet{Header: protocol.HeaderKeepAlive},

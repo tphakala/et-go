@@ -158,7 +158,7 @@ func testEnv(ev *events, con *fakeConsole, conn *fakeConn, bootErr error) env {
 			ev.add("bootstrap " + cfg.User + "@" + cfg.Destination)
 			return bootstrap.NewCredentials("XXXid", "secret"), bootErr
 		},
-		resolveHost: func(ctx context.Context, user, host string) string { return host },
+		resolveHost: func(ctx context.Context, user, host string, opts []string) string { return host },
 		dial: func(ctx context.Context, d *etcp.Dialer, addr string, creds bootstrap.Credentials) (sessionConn, error) {
 			ev.add("dial " + addr)
 			if d.Probe.Header != protocol.HeaderKeepAlive {
@@ -321,7 +321,7 @@ func TestDefaultEnvWiring(t *testing.T) {
 		t.Fatal("defaultEnv left a dependency nil")
 	}
 
-	if got := e.resolveHost(t.Context(), "", "et-go-test-host.invalid"); got != "et-go-test-host.invalid" {
+	if got := e.resolveHost(t.Context(), "", "et-go-test-host.invalid", nil); got != "et-go-test-host.invalid" {
 		t.Fatalf("resolveHost(unresolvable host) = %q, want the host unchanged", got)
 	}
 
