@@ -152,9 +152,11 @@ func TestWriteMessageWriterError(t *testing.T) {
 
 // TestWriteMessageSingleWrite pins the single-Write contract on the success
 // path: WriteMessage must build the length prefix and marshaled body in one
-// buffer before writing, not write the header and body separately. etcp
-// relies on this to keep a message from interleaving with another
-// goroutine's write on the same connection.
+// buffer before writing, not write the header and body separately, so that
+// on a connection whose Write is safe for concurrent use a message is never
+// split by another goroutine's write. etcp does not depend on it: each of
+// its connections has one writer at a time, and its handshake conn splits
+// large writes into chunks anyway.
 func TestWriteMessageSingleWrite(t *testing.T) {
 	sh := &protocol.SequenceHeader{}
 	sh.SetSequenceNumber(1)
@@ -172,8 +174,8 @@ func TestReadMessageGarbage(t *testing.T) {
 	// Length 2, then bytes that are not a valid protobuf (field 0 is illegal).
 	in := []byte{2, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x00}
 	var sh protocol.SequenceHeader
-	if err := ReadMessage(bytes.NewReader(in), &sh); err == nil {
-		t.Fatal("ReadMessage(garbage) = nil, want an unmarshal error")
+	if err := ReadMessage(bytes.NewReader(in), &sh); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("ReadMessage(garbage) = %v, want ErrMalformed", err)
 	}
 }
 
@@ -200,4 +202,39 @@ func FuzzReadMessage(f *testing.F) {
 			t.Fatalf("ReadMessage decoded %v, direct decode of the body gives %v", &cb, &want)
 		}
 	})
+}
+
+func TestWriteMessageShortWrite(t *testing.T) {
+	sh := &protocol.SequenceHeader{}
+	sh.SetSequenceNumber(1)
+	if err := WriteMessage(shortWriter{}, sh); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("WriteMessage = %v, want io.ErrShortWrite", err)
+	}
+}
+
+// See TestReadFrameWrappedEOF: bytes followed by a wrapped io.EOF are a cut.
+func TestReadMessageWrappedEOF(t *testing.T) {
+	var sh protocol.SequenceHeader
+	err := ReadMessage(&wrappedEOFReader{data: []byte{1, 0, 0}}, &sh)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("ReadMessage = %v, want io.ErrUnexpectedEOF", err)
+	}
+}
+
+// A peer that declares a message of MaxMessageSize and sends only a few
+// bytes must not make ReadMessage allocate the declared length up front.
+func TestReadMessageGrowsWithData(t *testing.T) {
+	in := binary.LittleEndian.AppendUint64(nil, MaxMessageSize)
+	in = append(in, 0x08, 0x01)
+	var sh protocol.SequenceHeader
+	var err error
+	got := allocatedBytes(func() {
+		err = ReadMessage(bytes.NewReader(in), &sh)
+	})
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("ReadMessage = %v, want io.ErrUnexpectedEOF", err)
+	}
+	if got > 1<<20 {
+		t.Fatalf("ReadMessage allocated %d bytes for a 2-byte body, want under 1 MiB", got)
+	}
 }

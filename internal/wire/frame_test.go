@@ -106,9 +106,10 @@ func TestWriteFrameWriterError(t *testing.T) {
 
 // TestWriteFrameSingleWrite pins the single-Write contract on the success
 // path: WriteFrame must build the length prefix and body in one buffer
-// before writing, not write the header and body separately. etcp relies on
-// this to keep a frame from interleaving with another goroutine's write on
-// the same connection.
+// before writing, not write the header and body separately, so a frame is
+// never split by another goroutine's write on a connection whose Write is
+// safe for concurrent use. etcp's link writer frames with AppendFrame and
+// issues its own single Write per batch.
 func TestWriteFrameSingleWrite(t *testing.T) {
 	w := &countingWriter{}
 	if err := WriteFrame(w, []byte("hello")); err != nil {
@@ -121,7 +122,13 @@ func TestWriteFrameSingleWrite(t *testing.T) {
 
 func TestWriteFrameLimit(t *testing.T) {
 	var buf bytes.Buffer
-	err := WriteFrame(&buf, make([]byte, MaxFrameSize+1))
+	frame := make([]byte, MaxFrameSize+1)
+	var err error
+	// The size is checked before the output buffer is allocated, so an
+	// oversized frame costs no 16 MiB allocation.
+	if got := allocatedBytes(func() { err = WriteFrame(&buf, frame) }); got > 1<<20 {
+		t.Fatalf("WriteFrame allocated %d bytes to reject an oversized frame", got)
+	}
 	if !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("WriteFrame = %v, want ErrTooLarge", err)
 	}
@@ -159,14 +166,32 @@ func TestReadFrameTruncated(t *testing.T) {
 	}
 }
 
+// FuzzReadFrame checks ReadFrame against the framing itself: on success the
+// body is exactly the bytes after the 4-byte length, and reading the same
+// input into a reused buffer, a small one or one that already holds bytes,
+// gives the same body or the same error.
 func FuzzReadFrame(f *testing.F) {
-	f.Add([]byte{0, 0, 0, 3, 1, 2, 3})
-	f.Add([]byte{0xff, 0xff, 0xff, 0xff})
-	f.Add([]byte{})
-	f.Fuzz(func(t *testing.T, in []byte) {
+	f.Add([]byte{0, 0, 0, 3, 1, 2, 3}, 0)
+	f.Add([]byte{0xff, 0xff, 0xff, 0xff}, 2)
+	f.Add([]byte{}, 64)
+	// 96 KiB declared: past the first 64 KiB grow chunk, with a body pattern
+	// that shows any bytes written at the wrong offset.
+	f.Add(append([]byte{0, 1, 0x80, 0}, bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7}, 14100)...), 100)
+	f.Fuzz(func(t *testing.T, in []byte, capacity int) {
 		got, err := ReadFrame(bytes.NewReader(in), nil)
-		if err == nil && len(got) > MaxFrameSize {
-			t.Fatalf("ReadFrame returned %d bytes, above MaxFrameSize", len(got))
+		if err == nil {
+			if len(in) < 4 {
+				t.Fatalf("ReadFrame succeeded on %d input bytes", len(in))
+			}
+			n := int(binary.BigEndian.Uint32(in))
+			if n > MaxFrameSize || !bytes.Equal(got, in[4:4+n]) {
+				t.Fatalf("ReadFrame body of %d bytes does not match the %d declared", len(got), n)
+			}
+		}
+		scratch := bytes.Repeat([]byte{0xee}, max(capacity, 0)%(1<<17))
+		again, err2 := ReadFrame(bytes.NewReader(in), scratch)
+		if (err == nil) != (err2 == nil) || !bytes.Equal(got, again) {
+			t.Fatalf("reused buffer (cap %d): got %d bytes, %v; fresh: %d bytes, %v", cap(scratch), len(again), err2, len(got), err)
 		}
 	})
 }
@@ -185,5 +210,111 @@ func BenchmarkFrameRoundTrip(b *testing.B) {
 		if scratch, err = ReadFrame(&buf, scratch); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func TestAppendFrame(t *testing.T) {
+	dst := []byte{0xee}
+	got, err := AppendFrame(dst, []byte{0xaa, 0xbb})
+	if err != nil {
+		t.Fatalf("AppendFrame: %v", err)
+	}
+	want := []byte{0xee, 0, 0, 0, 2, 0xaa, 0xbb}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("AppendFrame = % x, want % x", got, want)
+	}
+
+	got, err = AppendFrame(dst, make([]byte, MaxFrameSize+1))
+	if !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("AppendFrame(oversized) error = %v, want ErrTooLarge", err)
+	}
+	if !bytes.Equal(got, dst) {
+		t.Fatalf("AppendFrame(oversized) = % x, want dst unchanged", got)
+	}
+}
+
+// A writer that reports a short count without an error must not silently
+// truncate the frame.
+func TestWriteFrameShortWrite(t *testing.T) {
+	if err := WriteFrame(shortWriter{}, []byte("hello")); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("WriteFrame = %v, want io.ErrShortWrite", err)
+	}
+}
+
+// A reader that returns the first bytes of a length together with a wrapped
+// io.EOF has cut the stream mid-header: that is not a clean end. With no
+// byte read at all, the same wrapped io.EOF is a clean end, reported as a
+// plain io.EOF.
+func TestReadFrameWrappedEOF(t *testing.T) {
+	tests := []struct {
+		name  string
+		in    []byte
+		clean bool
+	}{
+		{name: "nothing read", in: nil, clean: true},
+		{name: "partial length", in: []byte{0, 0}},
+		{name: "partial body", in: []byte{0, 0, 0, 5, 'a'}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ReadFrame(&wrappedEOFReader{data: tt.in}, nil)
+			if tt.clean {
+				if err != io.EOF { //nolint:errorlint // a clean end must be the plain sentinel
+					t.Fatalf("ReadFrame = %v, want plain io.EOF", err)
+				}
+				return
+			}
+			if !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("ReadFrame = %v, want io.ErrUnexpectedEOF", err)
+			}
+		})
+	}
+}
+
+// A peer that declares a large frame and sends only a few bytes must not
+// make ReadFrame allocate the declared length up front.
+func TestReadFrameGrowsWithData(t *testing.T) {
+	in := []byte("\x01\x00\x00\x00only ten b") // 16 MiB declared, 10 bytes sent
+	var err error
+	got := allocatedBytes(func() {
+		_, err = ReadFrame(bytes.NewReader(in), nil)
+	})
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("ReadFrame = %v, want io.ErrUnexpectedEOF", err)
+	}
+	if got > 1<<20 {
+		t.Fatalf("ReadFrame allocated %d bytes for a 10-byte body, want under 1 MiB", got)
+	}
+}
+
+// ReadFrame into a buffer that is large enough, and AppendFrame into one,
+// allocate nothing: etcp's read and write loops run them for every packet.
+func TestFrameSteadyStateAllocs(t *testing.T) {
+	var enc bytes.Buffer
+	if err := WriteFrame(&enc, make([]byte, 1024)); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+	data := enc.Bytes()
+	r := bytes.NewReader(data)
+	buf := make([]byte, 0, 2048)
+	if n := testing.AllocsPerRun(100, func() {
+		r.Reset(data)
+		var err error
+		if buf, err = ReadFrame(r, buf); err != nil {
+			t.Fatalf("ReadFrame: %v", err)
+		}
+	}); n != 0 {
+		t.Errorf("ReadFrame with a reused buffer: %v allocs, want 0", n)
+	}
+
+	frame := make([]byte, 1024)
+	out := make([]byte, 0, 2048)
+	if n := testing.AllocsPerRun(100, func() {
+		var err error
+		if out, err = AppendFrame(out[:0], frame); err != nil {
+			t.Fatalf("AppendFrame: %v", err)
+		}
+	}); n != 0 {
+		t.Errorf("AppendFrame into a reused buffer: %v allocs, want 0", n)
 	}
 }
