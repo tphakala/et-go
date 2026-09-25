@@ -13,17 +13,19 @@ Module path: `github.com/tphakala/et-go`. Go version: see `go.mod`.
 
 ## Layout
 
-| Path                    | Role                                                                                                                                                                                                                 |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cmd/et`                | Entry point and flag parsing.                                                                                                                                                                                        |
-| `internal/bootstrap`    | Runs the system ssh to start etterminal; validates the config, parses the IDPASSKEY credentials it prints and redacts the passkey.                                                                                   |
-| `internal/console`      | Local console in raw mode per platform: raw VT input as UTF-8, output, window size and resize events, and a Close that unblocks a pending Read. Windows uses UTF-16 carry codecs shared with every platform's tests. |
-| `internal/etcp`         | Reliable, ordered, encrypted packet connection over replaceable TCP links: replay ring, recover exchange, liveness probes, reconnect backoff, write backpressure.                                                    |
-| `internal/etservertest` | Test-only fake etserver (written independently from upstream semantics) and an in-memory `net.Pipe` network with cut and refuse controls, for synctest-driven etcp tests.                                            |
-| `internal/protocol`     | Wire messages generated from upstream's `.proto` files (opaque API), plus `Header`, `Version` and `Packet`. Regenerate with `go generate ./internal/protocol` (needs protoc 3.21.12).                                |
-| `internal/seal`         | One direction of the libsodium-compatible encrypted stream: secretbox with a counter nonce.                                                                                                                          |
-| `internal/wire`         | Handshake message framing, stream frame framing, packet layout and size limits.                                                                                                                                      |
-| `rules/`                | ruleguard matchers used by golangci-lint (build tag `ruleguard`).                                                                                                                                                    |
+| Path                    | Role                                                                                                                                                                                                                                           |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cmd/et`                | Entry point: flag parsing, ssh_config host resolution, logging, signal handling, and wiring bootstrap, etcp, session and console into exit codes. Side effects are injected through `env` so tests can replace them.                           |
+| `internal/bootstrap`    | Runs the system ssh to start etterminal; validates the config, parses the IDPASSKEY credentials it prints and redacts the passkey.                                                                                                             |
+| `internal/console`      | Local console in raw mode per platform: raw VT input as UTF-8, output, window size and resize events, and a Close that unblocks a pending Read. Windows uses UTF-16 carry codecs shared with every platform's tests.                           |
+| `internal/etcp`         | Reliable, ordered, encrypted packet connection over replaceable TCP links: replay ring, recover exchange, liveness probes, reconnect backoff, write backpressure.                                                                              |
+| `internal/etservertest` | Test-only fake etserver (written independently from upstream semantics) and an in-memory `net.Pipe` network with cut and refuse controls, for synctest-driven etcp tests.                                                                      |
+| `internal/protocol`     | Wire messages generated from upstream's `.proto` files (opaque API), plus `Header`, `Version` and `Packet`. Regenerate with `go generate ./internal/protocol` (needs protoc 3.21.12).                                                          |
+| `internal/seal`         | One direction of the libsodium-compatible encrypted stream: secretbox with a counter nonce.                                                                                                                                                    |
+| `internal/session`      | The start handshake, a header router with per-service queues, the terminal service, and the local `Enter ~ .` escape. Never imports etcp: the end of a session arrives as a ReadPacket error wrapping io.EOF, which etcp.ErrSessionEnded does. |
+| `internal/wire`         | Handshake message framing, stream frame framing, packet layout and size limits.                                                                                                                                                                |
+| `rules/`                | ruleguard matchers used by golangci-lint (build tag `ruleguard`).                                                                                                                                                                              |
+| `test/e2e`              | `-tags e2e` tests that drive et against the real local etserver through a pty and a cutting proxy; CI vets it but never runs it.                                                                                                               |
 
 Update this table when a package is added.
 
@@ -36,7 +38,10 @@ go test ./... -race
 golangci-lint run                  # uses .golangci.yaml; CI pins the version in .github/workflows/ci.yml
 GOOS=windows golangci-lint run     # platform code is split by build tags; lint both sides
 go build -tags ruleguard ./rules/  # a broken rule otherwise compiles clean and silently disables ruleguard
+go fix -diff ./...                 # modernizers; CI also runs it with GOOS=windows and -tags e2e
+go vet -tags e2e ./test/e2e/       # CI type-checks the e2e suite without running it
 GOOS=js GOARCH=wasm go vet $(go list ./... | grep -v /cmd/et)  # also GOOS=wasip1; see below
+go test -tags e2e -count=1 ./test/e2e/   # needs etserver on 127.0.0.1:2022 and ssh localhost with key auth
 ```
 
 The client must stay pure Go: every target builds with `CGO_ENABLED=0`.
