@@ -2,7 +2,9 @@ package etcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -66,7 +68,9 @@ func (c *Conn) reconnect(b *backoff) (net.Conn, [][]byte, error) {
 // read at every step, this client reads the peer's two messages concurrently
 // with writing its own: done in sequence, the exchange deadlocks as soon as
 // the connection cannot buffer what both sides write (at once over net.Pipe,
-// and over TCP once both catchups exceed the socket buffers).
+// and over TCP once both catchups exceed the socket buffers). Whichever side
+// fails first closes conn to unblock the other; readerErrWins decides which
+// error is reported.
 func (c *Conn) recover(conn net.Conn) ([][]byte, error) {
 	var (
 		peer   protocol.SequenceHeader
@@ -81,6 +85,11 @@ func (c *Conn) recover(conn net.Conn) ([][]byte, error) {
 		if err == nil {
 			err = wire.ReadMessage(conn, &theirs)
 		}
+		if err != nil {
+			// Unblock the writer: upstream reads our messages only after
+			// writing its own, so ours may be stuck until the idle timeout.
+			_ = conn.Close()
+		}
 		gotAll <- err
 	})
 
@@ -90,11 +99,11 @@ func (c *Conn) recover(conn net.Conn) ([][]byte, error) {
 	}
 	rerr := <-gotAll
 	wg.Wait()
+	if rerr != nil && (err == nil || readerErrWins(err)) {
+		return nil, fmt.Errorf("etcp: read recover message: %w", rerr)
+	}
 	if err != nil {
 		return nil, err
-	}
-	if rerr != nil {
-		return nil, fmt.Errorf("etcp: read catchup: %w", rerr)
 	}
 
 	c.mu.Lock()
@@ -106,6 +115,17 @@ func (c *Conn) recover(conn net.Conn) ([][]byte, error) {
 		signal(c.space)
 	}
 	return theirs.GetBuffer(), nil
+}
+
+// readerErrWins reports whether the recover reader's error, rather than the
+// writer's err, explains a failed exchange: when the writer merely hit the
+// conn that the reader's failure closed. The reader's error is then the
+// cause, and a bad message from the server (which connect turns into
+// ErrIntegrity) is reported as such. A writer that failed on its own, with
+// ErrReplayExceeded or an I/O error, closed the conn first, so its error
+// stands.
+func readerErrWins(err error) bool {
+	return errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe)
 }
 
 // maxCatchupSize is the largest CatchupBuffer we send: etserver refuses

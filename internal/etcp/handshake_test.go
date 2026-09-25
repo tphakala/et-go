@@ -199,6 +199,67 @@ func TestDefaultNetDialer(t *testing.T) {
 	}
 }
 
+// The same holds for the recover exchange's SequenceHeader and CatchupBuffer,
+// even when the server, as upstream does, has not read our messages yet, so
+// our own write is still blocked when the bad message arrives.
+func TestBadRecoverMessageIsFatal(t *testing.T) {
+	bad := append(binary.LittleEndian.AppendUint64(nil, 3), 0xff, 0xff, 0xff) // does not decode
+	tests := []struct {
+		name string
+		good [][]byte // valid messages sent before the bad one
+	}{
+		{name: "sequence header"},
+		{name: "catchup buffer", good: [][]byte{binary.LittleEndian.AppendUint64(nil, 0)}}, // an empty SequenceHeader
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				quit := make(chan struct{})
+				s := &scripted{handle: func(i int, c *rawServer) {
+					if i == 0 {
+						c.acceptFrames(1)
+						return
+					}
+					if c.respond(protocol.ConnectStatus_RETURNING_CLIENT) != nil {
+						return
+					}
+					for _, m := range append(tt.good, bad) {
+						if _, err := c.conn.Write(m); err != nil {
+							return
+						}
+					}
+					<-quit // never read the client's messages
+				}}
+				d := etcp.Dialer{NetDialer: s}
+				conn, err := d.Dial(t.Context(), testAddr, testID, testKey)
+				if err != nil {
+					t.Fatalf("Dial: %v", err)
+				}
+				defer func() {
+					_ = conn.Close()
+					close(quit)
+					s.wg.Wait()
+				}()
+				start := time.Now()
+				if err := conn.WritePacket(t.Context(), numbered(0, 10)); err != nil {
+					t.Fatalf("WritePacket: %v", err)
+				}
+				if _, err := readPacket(t, conn); !errors.Is(err, etcp.ErrIntegrity) {
+					t.Fatalf("ReadPacket = %v, want ErrIntegrity", err)
+				}
+				if got := s.dials.Load(); got != 2 {
+					t.Fatalf("dials = %d, want 2: a bad recover message must not be retried", got)
+				}
+				// The reader's failure unblocks our stuck write at once, not
+				// after the 30 s handshake idle timeout.
+				if elapsed := time.Since(start); elapsed >= 30*time.Second {
+					t.Fatalf("recover failed after %v, want before the 30s idle timeout", elapsed)
+				}
+			})
+		})
+	}
+}
+
 // A redial whose ConnectResponse is oversized or does not decode can only
 // come from a broken or hostile server; as on the stream, the Conn ends
 // with ErrIntegrity instead of redialing forever.
