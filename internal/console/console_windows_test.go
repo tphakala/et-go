@@ -220,15 +220,34 @@ func TestSizeAfterClose(t *testing.T) {
 	}
 }
 
-// TestCloseWaitsForInFlightWrite needs no console: a Write in progress when
-// Close starts must finish before Close restores the modes and returns.
+// TestCloseWaitsForInFlightWrite needs no console: when Close starts while
+// a Write is inside its console call, Close must not set a console mode
+// until that call has returned, and must not return before it either. The
+// fake mode calls report a mode that differs from the baseline, so Close
+// really sets modes and the order can be observed.
 func TestCloseWaitsForInFlightWrite(t *testing.T) {
 	c := newConsole(0, 0)
+	c.inBase, c.outBase = 0x1f7, 0x7
+	var writing atomic.Bool // set while the fake console write is in progress
+	var sets atomic.Int32
+	c.getModeFn = func(_ windows.Handle, mode *uint32) error {
+		*mode = 0 // differs from both baselines, so Close sets each
+		return nil
+	}
+	c.setModeFn = func(windows.Handle, uint32) error {
+		sets.Add(1)
+		if writing.Load() {
+			t.Error("Close set a console mode while a Write was still in its console call")
+		}
+		return nil
+	}
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	c.writeFn = func(_ windows.Handle, _ *uint16, n uint32, written *uint32, _ *byte) error {
+		writing.Store(true)
 		close(entered)
 		<-release
+		writing.Store(false)
 		*written = n
 		return nil
 	}
@@ -255,6 +274,9 @@ func TestCloseWaitsForInFlightWrite(t *testing.T) {
 		t.Fatalf("in-flight Write = %v, want nil", err)
 	}
 	_ = recv(t, closed, "Close")
+	if sets.Load() == 0 {
+		t.Fatal("Close set no console mode, so the test observed no ordering")
+	}
 }
 
 // TestOpenWithoutConsoleKeepsCause runs where stdin is not a console (the
