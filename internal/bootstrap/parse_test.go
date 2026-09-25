@@ -10,35 +10,35 @@ func TestParseCredentials(t *testing.T) {
 	tests := []struct {
 		name    string
 		out     string
-		want    Credentials
-		wantErr string // "" means success; otherwise a substring the error must contain
+		wantErr string // "" means success with testID and testPasskey; otherwise a substring the error must contain
 	}{
-		{"plain", "IDPASSKEY:" + testID + "/" + testPasskey + "\n", NewCredentials(testID, testPasskey), ""},
-		{"crlf", "IDPASSKEY:" + testID + "/" + testPasskey + "\r\n", NewCredentials(testID, testPasskey), ""},
-		{"no trailing newline", "IDPASSKEY:" + testID + "/" + testPasskey, NewCredentials(testID, testPasskey), ""},
-		{"noise before", "Last login: Thu\nWelcome!\nIDPASSKEY:" + testID + "/" + testPasskey + "\n", NewCredentials(testID, testPasskey), ""},
-		{"first marker wins", "IDPASSKEY:" + testID + "/" + testPasskey + "\nIDPASSKEY:zzzzzzzzzzzzzzzz/" + testPasskey, NewCredentials(testID, testPasskey), ""},
-		{"no marker", "Welcome!\n", Credentials{}, "no IDPASSKEY"},
-		{"empty", "", Credentials{}, "no IDPASSKEY"},
-		{"truncated id", "IDPASSKEY:abcd", Credentials{}, "malformed id"},
-		{"id at end of output", "IDPASSKEY:" + testID, Credentials{}, "malformed id"},
-		{"colon instead of slash", "IDPASSKEY:" + testID + ":" + testPasskey, Credentials{}, "malformed id"},
-		{"truncated passkey", "IDPASSKEY:" + testID + "/0123", Credentials{}, "malformed passkey"},
-		{"id too long", "IDPASSKEY:" + testID + "X/" + testPasskey, Credentials{}, "malformed id"},
-		{"id too short", "IDPASSKEY:" + testID[1:] + "/" + testPasskey, Credentials{}, "malformed id"},
-		{"passkey too long", "IDPASSKEY:" + testID + "/" + testPasskey + "X\n", Credentials{}, "malformed passkey"},
-		{"missing slash", "IDPASSKEY:" + testID + testPasskey, Credentials{}, "malformed id"},
-		{"non alphanumeric in id", "IDPASSKEY:abcdEFGH1234567-/" + testPasskey, Credentials{}, "malformed id"},
-		{"non alphanumeric in passkey", "IDPASSKEY:" + testID + "/0123456789abcdef_BCDEF0123456789", Credentials{}, "malformed passkey"},
+		{"plain", "IDPASSKEY:" + testID + "/" + testPasskey + "\n", ""},
+		{"crlf", "IDPASSKEY:" + testID + "/" + testPasskey + "\r\n", ""},
+		{"no trailing newline", "IDPASSKEY:" + testID + "/" + testPasskey, ""},
+		{"noise before", "Last login: Thu\nWelcome!\nIDPASSKEY:" + testID + "/" + testPasskey + "\n", ""},
+		{"first marker wins", "IDPASSKEY:" + testID + "/" + testPasskey + "\nIDPASSKEY:zzzzzzzzzzzzzzzz/" + testPasskey, ""},
+		{"no marker", "Welcome!\n", "no IDPASSKEY"},
+		{"empty", "", "no IDPASSKEY"},
+		{"truncated id", "IDPASSKEY:abcd", "malformed id"},
+		{"id at end of output", "IDPASSKEY:" + testID, "malformed id"},
+		{"colon instead of slash", "IDPASSKEY:" + testID + ":" + testPasskey, "malformed id"},
+		{"truncated passkey", "IDPASSKEY:" + testID + "/0123", "malformed passkey"},
+		{"id too long", "IDPASSKEY:" + testID + "X/" + testPasskey, "malformed id"},
+		{"id too short", "IDPASSKEY:" + testID[1:] + "/" + testPasskey, "malformed id"},
+		{"passkey too long", "IDPASSKEY:" + testID + "/" + testPasskey + "X\n", "malformed passkey"},
+		{"missing slash", "IDPASSKEY:" + testID + testPasskey, "malformed id"},
+		{"non alphanumeric in id", "IDPASSKEY:abcdEFGH1234567-/" + testPasskey, "malformed id"},
+		{"non alphanumeric in passkey", "IDPASSKEY:" + testID + "/0123456789abcdef_BCDEF0123456789", "malformed passkey"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := parseCredentials([]byte(tt.out))
 			if tt.wantErr == "" {
-				// want's passkey is read from the field, not through Passkey,
-				// so a broken accessor cannot make both sides agree.
-				if err != nil || got.ID != tt.want.ID || got.Passkey() != *tt.want.passkey {
-					t.Fatalf("parseCredentials() = %v, %v; want %v, nil", got, err, tt.want)
+				// Compared with the constants, so a broken constructor or
+				// accessor cannot make both sides agree.
+				if err != nil || got.ID != testID || got.Passkey() != testPasskey {
+					t.Fatalf("parseCredentials() = %v with passkey match %v, %v; want id %s, the test passkey, nil",
+						got, got.Passkey() == testPasskey, err, testID)
 				}
 				return
 			}

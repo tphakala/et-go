@@ -94,9 +94,10 @@ func runFakeSSH(mode string, args []string) int {
 		return 0
 	case "hold":
 		// Keeps writing to the inherited stdout and exits on the first failed
-		// write, which comes as soon as the reader closes the pipe; the loop
-		// bound stops it even if nobody does.
-		for range 50 {
+		// write, which comes as soon as the reader closes the pipe. The loop
+		// outlasts waitDelay, so only Run's WaitDelay can end the "linger" run
+		// early, and it is bounded so nothing outlives the test by much.
+		for range 3 * waitDelay / (100 * time.Millisecond) {
 			if _, err := os.Stdout.WriteString("."); err != nil {
 				return 0
 			}
@@ -205,14 +206,19 @@ func TestRunWarnsWhenServerDoesNotRegenerate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	sent := regexp.MustCompile(`^echo '([A-Z2-7]{16})/`).FindStringSubmatch(readArgv(t, argvPath)[2])
-	if len(sent) != 2 || got.ID != sent[1] {
-		t.Fatalf("Run() id = %q, want the placeholder sent in the remote command (%q)", got.ID, sent)
+	// The expected values come from the command line the fake received, not
+	// from the Credentials under test, so a broken accessor cannot hide a leak.
+	sent := regexp.MustCompile(`^echo '([A-Z2-7]{16})/([A-Z2-7]{32})_`).FindStringSubmatch(readArgv(t, argvPath)[2])
+	if len(sent) != 3 {
+		t.Fatalf("remote command %q does not carry a placeholder id and passkey", readArgv(t, argvPath)[2])
+	}
+	if got.ID != sent[1] || got.Passkey() != sent[2] {
+		t.Fatalf("Run() = %v with passkey match %v, want the placeholder sent in the remote command", got, got.Passkey() == sent[2])
 	}
 	if !strings.Contains(logs.String(), "did not regenerate") {
 		t.Fatalf("no regeneration warning logged; logs: %s", logs.String())
 	}
-	if strings.Contains(logs.String(), got.Passkey()) {
+	if strings.Contains(logs.String(), sent[2]) {
 		t.Fatalf("warning leaks the passkey: %s", logs.String())
 	}
 }

@@ -46,8 +46,8 @@ func (c Credentials) String() string {
 	return "{ID:" + c.ID + " Passkey:" + redacted + "}"
 }
 
-// Format implements fmt.Formatter so every verb prints the redacted form; %#v
-// prints it as a Go literal.
+// Format implements fmt.Formatter so every verb fmt passes to it prints the
+// redacted form (fmt handles %T and %p itself); %#v prints it as a Go literal.
 func (c Credentials) Format(f fmt.State, verb rune) {
 	if verb == 'v' && f.Flag('#') {
 		_, _ = fmt.Fprintf(f, "bootstrap.Credentials{ID:%q, Passkey:%q}", c.ID, redacted)
