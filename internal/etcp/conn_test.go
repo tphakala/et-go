@@ -80,8 +80,9 @@ func TestDialErrors(t *testing.T) {
 }
 
 // Options outside their documented range are refused before dialing: a
-// negative KeepAlive fires the watcher at once and redials forever, a
-// negative ReplayLimit blocks every write, and a ReplayLimit above
+// negative KeepAlive makes the watcher fire at once (spinning before the
+// first packet, then redialing forever), a negative ReplayLimit blocks every
+// write, and a ReplayLimit above
 // upstream's 64 MiB is refused as documented. The boundary values themselves
 // are accepted.
 func TestDialRejectsBadOptions(t *testing.T) {
@@ -146,6 +147,59 @@ func TestDialContextCauseMidHandshake(t *testing.T) {
 		s.wg.Wait()
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("Dial = %v, want an error wrapping context.DeadlineExceeded", err)
+		}
+	})
+}
+
+// cancelOnReplyConn cancels its context inside the Read that delivers the
+// first handshake reply's body (past its 8-byte length), so the deadline
+// deterministically lands just as the server's answer arrives.
+type cancelOnReplyConn struct {
+	net.Conn
+	read   int
+	cancel context.CancelCauseFunc
+	cause  error
+}
+
+func (c *cancelOnReplyConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	c.read += n
+	if c.read > 8 {
+		c.cancel(c.cause)
+	}
+	return n, err
+}
+
+type cancelOnReplyDialer struct {
+	inner  *scripted
+	cancel context.CancelCauseFunc
+	cause  error
+}
+
+func (d cancelOnReplyDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	c, err := d.inner.DialContext(ctx, network, address)
+	if err != nil {
+		return nil, err
+	}
+	return &cancelOnReplyConn{Conn: c, cancel: d.cancel, cause: d.cause}, nil
+}
+
+// A definitive answer from the server that arrives as the caller's context
+// ends is reported, not hidden behind the context's cause.
+func TestDialKeepsDefinitiveAnswerOverCause(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := &scripted{handle: func(_ int, c *rawServer) { _ = c.respond(protocol.ConnectStatus_INVALID_KEY) }}
+		errCause := errors.New("caller gave up")
+		ctx, cancel := context.WithCancelCause(t.Context())
+		defer cancel(nil)
+		d := etcp.Dialer{NetDialer: cancelOnReplyDialer{inner: s, cancel: cancel, cause: errCause}}
+		_, err := d.Dial(ctx, testAddr, testID, testKey)
+		s.wg.Wait()
+		if ctx.Err() == nil {
+			t.Fatal("the context did not end during the handshake, so the test proved nothing")
+		}
+		if !errors.Is(err, etcp.ErrRejected) || errors.Is(err, errCause) {
+			t.Fatalf("Dial = %v, want ErrRejected, not the context's cause", err)
 		}
 	})
 }

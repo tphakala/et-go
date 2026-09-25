@@ -85,9 +85,11 @@ func runProperty(t *testing.T, seed uint64) {
 
 	// expectNumbered stops at packet n-1, so a recover after the last packet
 	// is otherwise never exercised. Force one now that both sides hold
-	// everything: it must replay nothing (a resent packet would surface as a
-	// duplicate or, with counter nonces, as an integrity error) and must
-	// settle, with no further redial across the quiet minute.
+	// everything: it must replay nothing and must settle, with no further
+	// redial across the quiet minute. With counter nonces a resent packet
+	// fails the receiver's authentication: the client ends its Conn with
+	// ErrIntegrity (a read error below), while the fake server just drops
+	// the link, which shows up as a redial loop in the dial count.
 	beforeCut := h.net.Dials()
 	h.net.CutAll()
 	synctest.Sleep(time.Minute)

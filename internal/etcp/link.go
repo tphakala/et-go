@@ -193,7 +193,8 @@ func (c *Conn) watch(ctx context.Context, l *link) error {
 				// No probe before the caller's first packet: etserver 7.0.0
 				// aborts when a session's first packet is not INITIAL_PAYLOAD
 				// (src/terminal/TerminalServer.cpp:429-439 at et-v7.0.0).
-				// Until then a dead link is left to TCP keepalive.
+				// Until then a dead link is found only by a read error or
+				// by TCP keepalive when the NetDialer enables it.
 				probed = false
 			case probed:
 				return errLinkDead

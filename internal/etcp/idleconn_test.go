@@ -65,13 +65,25 @@ func TestIdleConnWriteProgressKeepsReadAlive(t *testing.T) {
 			_, err := io.ReadFull(ic, make([]byte, 1)) // the peer never writes
 			readErr <- err
 		}()
+		stop := make(chan struct{})
+		drained := make(chan struct{})
+		defer func() { // no goroutine outlives a failed assertion
+			close(stop)
+			_ = server.Close() // ends a drainer blocked in Read
+			<-drained
+		}()
 		go func() { // the peer drains 8 KiB/s
+			defer close(drained)
 			buf := make([]byte, 8<<10)
 			for {
 				if _, err := server.Read(buf); err != nil {
 					return
 				}
-				time.Sleep(time.Second)
+				select {
+				case <-stop:
+					return
+				case <-time.After(time.Second):
+				}
 			}
 		}()
 

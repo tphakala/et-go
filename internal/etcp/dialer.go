@@ -64,18 +64,18 @@ type Dialer struct {
 	NetDialer interface {
 		DialContext(ctx context.Context, network, address string) (net.Conn, error)
 	}
-	// KeepAlive is the quiet period after which a probe is sent; after two quiet
-	// periods the link is declared dead. Only inbound frames count as proof
-	// of life, and the probe queues behind any unsent backlog, so an upload
-	// that takes longer than two periods to drain while the server sends
-	// nothing costs a reconnect (the data survives it). Zero means 5 s
-	// (upstream's maximum,
-	// src/base/Headers.hpp:180 at et-v7.0.0); Dial refuses a negative value
-	// or one below 100 ms. Probing starts only after the first WritePacket,
-	// because etserver aborts when a session's first packet is not
-	// INITIAL_PAYLOAD (src/terminal/TerminalServer.cpp:429-439 at et-v7.0.0);
-	// before that, a dead link is detected only by a read error or by TCP
-	// keepalive when the NetDialer enables it (the default one does).
+	// KeepAlive is the quiet period after which a probe is sent; after two
+	// quiet periods the link is declared dead. Only inbound frames count as
+	// proof of life, and the probe queues behind any unsent backlog, so an
+	// upload that takes longer than two periods to drain while the server
+	// sends nothing costs a reconnect (the data survives it). Zero means 5 s
+	// (upstream's maximum, src/base/Headers.hpp:180 at et-v7.0.0); Dial
+	// refuses a negative value or one below 100 ms. Probing starts only
+	// after the first WritePacket, because etserver aborts when a session's
+	// first packet is not INITIAL_PAYLOAD
+	// (src/terminal/TerminalServer.cpp:429-439 at et-v7.0.0); before that, a
+	// dead link is detected only by a read error or by TCP keepalive when
+	// the NetDialer enables it (the default one does).
 	KeepAlive time.Duration
 	// Probe is the packet sent as a liveness probe. The zero value sends header 0
 	// with no payload, which is KEEP_ALIVE, echoed by etserver once the session
@@ -176,8 +176,9 @@ type netDialer interface {
 // recover exchange for a returning client). It returns the ready connection
 // and the peer's catchup entries, which the new link delivers first. If ctx
 // ends during the dial or the handshake, the error wraps context.Cause(ctx),
-// unless the server's definitive answer (one isFatal accepts) came first. A
-// handshake message that is oversized or does not decode yields ErrIntegrity.
+// unless a definitive error (one isFatal accepts, such as the server's
+// rejection) came first. A handshake message that is oversized or does not
+// decode yields ErrIntegrity.
 func (c *Conn) connect(ctx context.Context, first bool) (net.Conn, [][]byte, error) {
 	dctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
@@ -204,9 +205,11 @@ func (c *Conn) connect(ctx context.Context, first bool) (net.Conn, [][]byte, err
 	if err != nil {
 		_ = nc.Close()
 		if errors.Is(err, wire.ErrTooLarge) || errors.Is(err, wire.ErrMalformed) {
-			// Only a broken or hostile server sends a handshake message
-			// that is oversized or does not decode; as on the stream, the
-			// session cannot continue, and redialing would meet it again.
+			// A handshake message from the server that is oversized or
+			// does not decode means a broken or hostile peer (a cut stream
+			// yields an EOF error instead); as on the stream, the session
+			// cannot continue, and redialing would meet it again. Our own
+			// messages are far below the limit.
 			err = fmt.Errorf("%w: %w", ErrIntegrity, err)
 		}
 		if ctx.Err() != nil && !isFatal(err) {

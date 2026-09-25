@@ -21,9 +21,10 @@ func (w *countingWriter) Write(p []byte) (int, error) {
 }
 
 // BenchmarkDrainBacklog drains a backlog of minimum-size entries, the shape a
-// long outage with small interactive packets leaves. It shows the drain's
-// cost against the backlog's size (it fails on nothing): taking the whole
-// backlog on every writer pass made that cost quadratic.
+// long outage with small interactive packets leaves, and fails only if the
+// writer stops before the backlog is drained. It measures one backlog size;
+// compare runs before and after a writer change to see its cost (taking the
+// whole backlog on every writer pass made the drain quadratic).
 func BenchmarkDrainBacklog(b *testing.B) {
 	const entries = 500_000
 	for b.Loop() {
