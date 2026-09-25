@@ -150,6 +150,32 @@ func TestDialContextCauseMidHandshake(t *testing.T) {
 	})
 }
 
+// blockingDialer never connects: it waits for ctx and returns its error, as
+// net.Dialer does for a dial that has not finished.
+type blockingDialer struct{}
+
+func (blockingDialer) DialContext(ctx context.Context, _, _ string) (net.Conn, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// The cause is reported the same way when ctx ends while the TCP dial itself
+// is still in progress, not only during the handshake.
+func TestDialContextCauseDuringDial(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		errCause := errors.New("caller gave up")
+		ctx, cancel := context.WithCancelCause(t.Context())
+		go func() {
+			time.Sleep(time.Second)
+			cancel(errCause)
+		}()
+		d := etcp.Dialer{NetDialer: blockingDialer{}}
+		if _, err := d.Dial(ctx, testAddr, testID, testKey); !errors.Is(err, errCause) {
+			t.Fatalf("Dial = %v, want an error wrapping the context's cause", err)
+		}
+	})
+}
+
 func TestDialRejectsShortPasskey(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := &scripted{handle: func(_ int, c *rawServer) {

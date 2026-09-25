@@ -23,11 +23,14 @@ const (
 	defaultReplayLimit = 64 << 20        // upstream MAX_BACKUP_BYTES (src/base/BackedWriter.hpp:32 at et-v7.0.0)
 	dialTimeout        = 10 * time.Second
 
-	// minKeepAlive is the smallest non-zero KeepAlive Dial accepts; below it
-	// the watcher would probe and drop links faster than any round trip.
+	// minKeepAlive is the smallest non-zero KeepAlive Dial accepts, a policy
+	// floor: much below it the watcher would probe and drop links faster
+	// than a typical round trip, and a nanosecond value would spin.
 	minKeepAlive = 100 * time.Millisecond
 	// maxReplayLimit is the largest ReplayLimit Dial accepts: upstream's own
-	// bound, which keeps a catchup well inside the message limit.
+	// MAX_BACKUP_BYTES. It does not by itself keep a catchup under the
+	// message limit (a disconnected ring can hold about twice the limit);
+	// writeRecover checks the size and fails with ErrReplayExceeded.
 	maxReplayLimit = defaultReplayLimit
 )
 
@@ -68,10 +71,11 @@ type Dialer struct {
 	// nothing costs a reconnect (the data survives it). Zero means 5 s
 	// (upstream's maximum,
 	// src/base/Headers.hpp:180 at et-v7.0.0); Dial refuses a negative value
-	// or one below 100 ms. Probing starts only after the
-	// first WritePacket, because etserver aborts when a session's first packet
-	// is not INITIAL_PAYLOAD (src/terminal/TerminalServer.cpp:429-439); before
-	// that, a dead link is detected only by TCP keepalive.
+	// or one below 100 ms. Probing starts only after the first WritePacket,
+	// because etserver aborts when a session's first packet is not
+	// INITIAL_PAYLOAD (src/terminal/TerminalServer.cpp:429-439 at et-v7.0.0);
+	// before that, a dead link is detected only by a read error or by TCP
+	// keepalive when the NetDialer enables it (the default one does).
 	KeepAlive time.Duration
 	// Probe is the packet sent as a liveness probe. The zero value sends header 0
 	// with no payload, which is KEEP_ALIVE, echoed by etserver once the session
@@ -171,13 +175,19 @@ type netDialer interface {
 // connect dials one TCP link and runs the connect handshake on it (plus the
 // recover exchange for a returning client). It returns the ready connection
 // and the peer's catchup entries, which the new link delivers first. If ctx
-// ends during the handshake, the error wraps context.Cause(ctx). A handshake
-// message that is oversized or does not decode yields ErrIntegrity.
+// ends during the dial or the handshake, the error wraps context.Cause(ctx),
+// unless the server's definitive answer (one isFatal accepts) came first. A
+// handshake message that is oversized or does not decode yields ErrIntegrity.
 func (c *Conn) connect(ctx context.Context, first bool) (net.Conn, [][]byte, error) {
 	dctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 	nc, err := c.netDialer.DialContext(dctx, "tcp", c.addr)
 	if err != nil {
+		if ctx.Err() != nil {
+			// As for the handshake below: the caller needs its cause, not
+			// the dialer's generic context error.
+			return nil, nil, fmt.Errorf("etcp: dial: %w", context.Cause(ctx))
+		}
 		return nil, nil, fmt.Errorf("etcp: dial: %w", err)
 	}
 	stop := context.AfterFunc(ctx, func() { _ = nc.Close() })
@@ -199,9 +209,11 @@ func (c *Conn) connect(ctx context.Context, first bool) (net.Conn, [][]byte, err
 			// session cannot continue, and redialing would meet it again.
 			err = fmt.Errorf("%w: %w", ErrIntegrity, err)
 		}
-		if ctx.Err() != nil {
+		if ctx.Err() != nil && !isFatal(err) {
 			// Ending ctx closes nc, so the handshake reports a closed
-			// connection; the cause is what the caller needs.
+			// connection; the cause is what the caller needs. A definitive
+			// answer that arrived just before (a rejection, a version
+			// mismatch) is kept: it says more than the deadline does.
 			return nil, nil, fmt.Errorf("etcp: connect: %w", context.Cause(ctx))
 		}
 		return nil, nil, err
@@ -228,8 +240,10 @@ func (c *Conn) handshake(conn net.Conn, first bool) ([][]byte, error) {
 		// Deliberately stricter than upstream, whose client closes the
 		// socket and keeps redialing on any status other than INVALID_KEY
 		// and RETURNING_CLIENT (src/base/ClientConnection.cpp:113-127 at
-		// et-v7.0.0). A server answering NEW_CLIENT has lost the session's
-		// state, and redialing cannot bring it back.
+		// et-v7.0.0). This applies to NEW_CLIENT here and equally to
+		// MISMATCHED_PROTOCOL and unknown statuses below: a server that
+		// has lost the session's state or changed protocol will not answer
+		// differently on the next redial.
 		return nil, fmt.Errorf("%w: server answered NEW_CLIENT to a returning client", ErrRejected)
 	case protocol.ConnectStatus_RETURNING_CLIENT:
 		// Also possible on the first connect, when an earlier attempt died

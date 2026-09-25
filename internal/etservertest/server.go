@@ -2,9 +2,9 @@
 // network, so etcp can be tested without sockets and under testing/synctest.
 //
 // The server is written independently of etcp, from upstream EternalTerminal
-// semantics (tag et-v7.0.0), so the two implementations check each other. In particular it writes its whole catchup before reading
-// the client's, exactly like upstream's Connection::recover
-// (src/base/Connection.cpp:105-143).
+// semantics (tag et-v7.0.0), so the two implementations check each other.
+// In particular it writes its whole catchup before reading the client's,
+// exactly like upstream's Connection::recover (src/base/Connection.cpp:105-143).
 package etservertest
 
 import (
@@ -70,9 +70,11 @@ func NewServer(id, passkey string) *Server {
 
 // Serve runs one link on c: the connect handshake (and the recover exchange
 // for a returning client), then the encrypted stream, until c fails, the
-// session ends or ctx ends. A newer link replaces an older one, as upstream
-// closes the old socket before recovering on the new one
-// (src/base/ServerClientConnection.cpp:27-35 at et-v7.0.0).
+// session ends or ctx ends. A link replaces the one before it when it takes
+// over, as upstream closes the old socket before recovering on the new one
+// (src/base/ServerClientConnection.cpp:27-35 at et-v7.0.0). Takeover follows
+// the order links reach it, not the order they connected, so a test that
+// connects twice waits for the first link to settle.
 func (s *Server) Serve(ctx context.Context, c net.Conn) error {
 	defer func() { _ = c.Close() }()
 	stop := context.AfterFunc(ctx, func() { _ = c.Close() })

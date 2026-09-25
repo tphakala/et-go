@@ -20,10 +20,10 @@ const (
 //
 // Progress in either direction also pushes the other direction's deadline. In
 // the recover exchange upstream writes its whole catchup before it reads ours
-// (src/base/Connection.cpp:125-135), so our catchup write cannot progress
-// while the server's catchup is still arriving; that write must not time out
-// while those bytes flow. The connection is idle only when neither direction
-// moves.
+// (src/base/Connection.cpp:125-135 at et-v7.0.0), so once the socket
+// buffers fill, our catchup write cannot progress while the server's catchup
+// is still arriving; that write must not time out while those bytes flow.
+// The connection is idle only when neither direction moves.
 type idleConn struct {
 	net.Conn
 	timeout time.Duration

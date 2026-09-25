@@ -120,8 +120,9 @@ func (c *Conn) ReadPacket(ctx context.Context) (protocol.Packet, error) {
 
 // Close shuts the connection down and waits for its goroutines. Afterwards
 // WritePacket returns net.ErrClosed, and ReadPacket returns any packets that
-// had already arrived and then net.ErrClosed. The server keeps the session;
-// a later client cannot resume it (the replay state is gone).
+// had already arrived and then net.ErrClosed; if the Conn had already
+// failed, both keep returning the error it failed with. The server keeps the
+// session; a later client cannot resume it (the replay state is gone).
 func (c *Conn) Close() error {
 	c.cancel(errClosed)
 	c.wg.Wait()
