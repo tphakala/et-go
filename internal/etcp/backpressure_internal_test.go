@@ -92,3 +92,32 @@ func TestWakeupNotLostOnCancel(t *testing.T) {
 		})
 	}
 }
+
+// A write that reaches the queue lock after the Conn ended is refused, not
+// queued on the dead Conn. The test holds the lock so the writer parks on
+// it, then ends the Conn. It uses real time because synctest cannot wait
+// for a goroutine blocked on a mutex; a writer that has not reached the lock
+// in time sees the ended Conn anyway, so the test cannot fail spuriously.
+func TestWritePacketRefusedOnceConnEnded(t *testing.T) {
+	var d Dialer
+	c := d.newConn("et.example:2022", "XXXtestclient001", strings.Repeat("k", 32))
+	c.mu.Lock()
+	done := make(chan error, 1)
+	go func() { done <- c.WritePacket(t.Context(), protocol.Packet{}) }()
+	time.Sleep(50 * time.Millisecond) // let the writer park on c.mu
+	c.cancel(errClosed)
+	c.mu.Unlock()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("WritePacket = nil after the Conn ended, want its cause")
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("WritePacket did not return")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if n := c.ring.next(); n != 0 {
+		t.Fatalf("%d packets queued on the ended Conn, want 0", n)
+	}
+}

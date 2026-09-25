@@ -81,10 +81,13 @@ func (c *Conn) WritePacket(ctx context.Context, p protocol.Packet) error {
 		return context.Cause(ctx)
 	}
 	for {
+		c.mu.Lock()
+		// Checked under the lock: a write that waited for it while the
+		// Conn ended must not be queued on the dead Conn.
 		if c.ctx.Err() != nil {
+			c.mu.Unlock()
 			return context.Cause(c.ctx)
 		}
-		c.mu.Lock()
 		if c.unsent <= c.limit {
 			c.enqueueLocked(p)
 			room := c.unsent <= c.limit
