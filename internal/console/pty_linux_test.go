@@ -1,6 +1,7 @@
 package console
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -17,7 +18,7 @@ func openPTY(t *testing.T) (master, slave *os.File) {
 	if err != nil {
 		t.Fatalf("open /dev/ptmx: %v", err)
 	}
-	t.Cleanup(func() { _ = master.Close() })
+	closeAtEnd(t, master)
 
 	var n int
 	err = controlFile(master, func(fd int) error {
@@ -35,8 +36,21 @@ func openPTY(t *testing.T) (master, slave *os.File) {
 	if err != nil {
 		t.Fatalf("open pty slave: %v", err)
 	}
-	t.Cleanup(func() { _ = slave.Close() })
+	closeAtEnd(t, slave)
 	return master, slave
+}
+
+// closeAtEnd closes f when the test ends and reports a close error. A
+// Console built on f with newConsole owns it and closes it in Close, so
+// the second close here is deliberate: os.ErrClosed is ignored, any other
+// error is reported.
+func closeAtEnd(t *testing.T, f *os.File) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := f.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			t.Errorf("close %s: %v", f.Name(), err)
+		}
+	})
 }
 
 // termios reads the terminal attributes of f.

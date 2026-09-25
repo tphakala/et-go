@@ -42,14 +42,15 @@ type Console struct {
 	closed bool // guarded by mu
 }
 
-// Open returns the console attached to stdin and stdout. It returns an error
+// Open checks that stdin and stdout are terminals, then opens the
+// controlling terminal (/dev/tty) as the console. It returns an error
 // satisfying errors.Is(err, ErrNotTerminal) if either is not a terminal or
 // the process has no controlling terminal.
 //
 // Open records the terminal state as the baseline that restore returns to.
-// Call it before running anything that may leave the terminal in a changed
-// mode (cmd/et runs ssh between Open and MakeRaw; an interrupted password
-// prompt can leave echo off).
+// The intended caller opens the console before running anything that may
+// leave it in a changed mode, such as ssh between Open and MakeRaw, where
+// an interrupted password prompt can leave echo off.
 func Open() (*Console, error) {
 	return open("/dev/tty", os.Stdin, os.Stdout)
 }
@@ -261,6 +262,7 @@ func (c *Console) control(f func(fd int) error) error {
 	return controlFile(c.tty, f)
 }
 
+// controlFile runs f with file's descriptor through SyscallConn, never Fd.
 func controlFile(file *os.File, f func(fd int) error) error {
 	rc, err := file.SyscallConn()
 	if err != nil {
@@ -273,6 +275,7 @@ func controlFile(file *os.File, f func(fd int) error) error {
 	return ferr
 }
 
+// isTerminal reports whether f is a terminal; an error reading it counts as no.
 func isTerminal(f *os.File) bool {
 	var ok bool
 	err := controlFile(f, func(fd int) error {

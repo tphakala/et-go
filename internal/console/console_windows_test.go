@@ -257,6 +257,25 @@ func TestCloseWaitsForInFlightWrite(t *testing.T) {
 	_ = recv(t, closed, "Close")
 }
 
+// TestOpenWithoutConsoleKeepsCause runs where stdin is not a console (the
+// test binary run with its standard handles redirected): Open must report
+// ErrNotTerminal and keep the Windows error that caused it.
+func TestOpenWithoutConsoleKeepsCause(t *testing.T) {
+	c, err := Open()
+	if err == nil {
+		if cerr := c.Close(); cerr != nil {
+			t.Errorf("Close: %v", cerr)
+		}
+		t.Skip("a console is attached; run the test binary with redirected standard handles")
+	}
+	if !errors.Is(err, ErrNotTerminal) {
+		t.Fatalf("Open error = %v, want ErrNotTerminal", err)
+	}
+	if _, ok := errors.AsType[windows.Errno](err); !ok {
+		t.Fatalf("Open error = %v, want it to wrap the Windows error that caused it", err)
+	}
+}
+
 // openConsole returns the real console, or skips when the test binary has
 // none (for example when its output is piped). The console is closed when
 // the test ends, which returns it to the Open baseline for the next test;

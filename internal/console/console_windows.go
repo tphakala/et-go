@@ -76,25 +76,29 @@ type Console struct {
 	buf []uint16
 }
 
-// Open returns the console attached to stdin and stdout, or ErrNotTerminal
-// if either is not a console.
+// Open returns the console attached to stdin and stdout. It returns an error
+// satisfying errors.Is(err, ErrNotTerminal) if either is not a console or
+// its standard handle cannot be read; the error also wraps the cause.
 //
 // Open records the console modes as the baseline that restore returns to.
-// Call it before running anything that may leave the console in a changed
-// mode (cmd/et runs ssh.exe between Open and MakeRaw; an interrupted
-// password prompt can leave echo off).
+// The intended caller opens the console before running anything that may
+// leave it in a changed mode, such as ssh.exe between Open and MakeRaw,
+// where an interrupted password prompt can leave echo off.
 func Open() (*Console, error) {
 	in, err := windows.GetStdHandle(windows.STD_INPUT_HANDLE)
 	if err != nil {
-		return nil, fmt.Errorf("console: stdin handle: %w", err)
+		return nil, fmt.Errorf("%w: stdin handle: %w", ErrNotTerminal, err)
 	}
 	out, err := windows.GetStdHandle(windows.STD_OUTPUT_HANDLE)
 	if err != nil {
-		return nil, fmt.Errorf("console: stdout handle: %w", err)
+		return nil, fmt.Errorf("%w: stdout handle: %w", ErrNotTerminal, err)
 	}
 	c := newConsole(in, out)
-	if windows.GetConsoleMode(in, &c.inBase) != nil || windows.GetConsoleMode(out, &c.outBase) != nil {
-		return nil, ErrNotTerminal
+	if err := windows.GetConsoleMode(in, &c.inBase); err != nil {
+		return nil, fmt.Errorf("%w: stdin console mode: %w", ErrNotTerminal, err)
+	}
+	if err := windows.GetConsoleMode(out, &c.outBase); err != nil {
+		return nil, fmt.Errorf("%w: stdout console mode: %w", ErrNotTerminal, err)
 	}
 	return c, nil
 }
@@ -114,7 +118,10 @@ func newConsole(in, out windows.Handle) *Console {
 
 // MakeRaw switches the console to raw VT input and VT output processing,
 // starting from the modes recorded by Open. Code pages are not touched: Read
-// and Write use the UTF-16 console APIs, which bypass them. It may be
+// and Write use the UTF-16 console APIs, and a console code page applies
+// only to the 8-bit form of those calls (Microsoft docs, ReadConsole and
+// WriteConsole remarks: "uses either Unicode characters or 8-bit
+// characters from the console's current code page"). It may be
 // called again after restore; Close still returns the console to the Open
 // baseline. Once Close has started it returns an error satisfying
 // errors.Is(err, os.ErrClosed) and leaves the console alone.
@@ -150,8 +157,11 @@ func (c *Console) MakeRaw() (restore func() error, err error) {
 	if err := windows.SetConsoleMode(c.out, rawOut|windows.DISABLE_NEWLINE_AUTO_RETURN); err != nil {
 		// If the host rejects DISABLE_NEWLINE_AUTO_RETURN, run without it.
 		if err := windows.SetConsoleMode(c.out, rawOut); err != nil {
-			_ = windows.SetConsoleMode(c.in, c.inBase)
-			return nil, fmt.Errorf("console: set output mode: %w", err)
+			rollback := windows.SetConsoleMode(c.in, c.inBase)
+			if rollback != nil {
+				rollback = fmt.Errorf("console: roll back input mode: %w", rollback)
+			}
+			return nil, errors.Join(fmt.Errorf("console: set output mode: %w", err), rollback)
 		}
 	}
 
@@ -199,16 +209,17 @@ func (c *Console) setModeIfChanged(h windows.Handle, mode uint32) error {
 	return set(h, mode)
 }
 
-// Read reads raw VT input as UTF-8. Once Close has run, Read returns
+// Read reads raw VT input as UTF-8. Once Close has started, Read returns
 // os.ErrClosed, including a Read that was blocked and any bytes still
 // buffered from an earlier console read. A console read that returns no
 // units is retried.
 //
-// Ctrl+Break does not end a pending read. MEASURED on win11-qa under
-// ConPTY (ssh -tt), 2026-09-25: with a handler that consumes
+// A generated Ctrl+Break does not end a pending read. MEASURED on win11-qa
+// under ConPTY (ssh -tt), 2026-09-25: with a handler that consumes
 // CTRL_BREAK_EVENT (as OnBreak installs), GenerateConsoleCtrlEvent
 // (CTRL_BREAK_EVENT, 0) ran the handler and left ReadConsoleW pending in
-// raw and in line mode, so Read needs no handling for it.
+// raw and in line mode, so Read has no handling for it. A physical
+// Ctrl+Break key press is unmeasured.
 func (c *Console) Read(p []byte) (int, error) {
 	read := c.readFn
 	if read == nil {
@@ -252,8 +263,9 @@ func (c *Console) Read(p []byte) (int, error) {
 }
 
 // Write writes remote output, at most writeUnits UTF-16 units per console
-// call and never splitting a surrogate pair between calls. An incomplete
-// UTF-8 sequence at the end of p is held until the next Write completes it.
+// call, and never ends the chunk it hands to a call on a high surrogate.
+// An incomplete UTF-8 sequence at the end of p is held until the next
+// Write completes it.
 // When the console reports a partial write, Write continues from the first
 // unit not written, so a pair can be split between calls only if the
 // console itself reports writing half of it. Whether any console host does
@@ -471,9 +483,12 @@ var (
 // Windows still raises as a control event while processed input is off
 // (Ctrl+C arrives as a byte instead; Microsoft docs, CTRL+C and CTRL+BREAK
 // Signals: "CTRL+BREAK is always treated as a signal"). Only the most
-// recent f is kept; OnBreak(nil) unregisters it, and Ctrl+Break then has
-// its default effect of ending the process. If the handler cannot be
-// installed, Ctrl+Break also keeps its default effect.
+// recent f is kept. OnBreak(nil) unregisters it, and Ctrl+Break then goes
+// to the next handler: the Go runtime's, which delivers it as os.Interrupt
+// if the program called signal.Notify for it, and otherwise passes it on to
+// the default handler, which ends the process (runtime/os_windows.go,
+// ctrlHandler, go1.27.0; Microsoft docs, HandlerRoutine remarks). If the
+// handler cannot be installed, Ctrl+Break reaches those handlers directly.
 func OnBreak(f func()) {
 	if f == nil {
 		breakFunc.Store(nil)
@@ -487,7 +502,9 @@ func OnBreak(f func()) {
 
 // ctrlHandler handles CTRL_BREAK_EVENT when a function is registered, and
 // leaves every other event (Ctrl+C, close, logoff, shutdown) to the next
-// handler. It runs on a thread Windows creates.
+// handler. It runs on a thread Windows creates for the call (Microsoft docs,
+// HandlerRoutine: "the system creates a new thread in the process to
+// execute the function").
 func ctrlHandler(ctrlType uint32) uintptr {
 	if ctrlType != windows.CTRL_BREAK_EVENT {
 		return 0

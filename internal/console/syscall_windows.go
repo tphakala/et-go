@@ -24,8 +24,9 @@ type keyEventRecord struct {
 }
 
 // inputRecord is INPUT_RECORD (20 bytes). Event is a union in C; KEY_EVENT
-// is the only variant this package writes, and KEY_EVENT_RECORD is the
-// union's largest member, so the layout matches.
+// is the only variant this package writes, and KEY_EVENT_RECORD is one of
+// the union's largest members (MOUSE_EVENT_RECORD is as large), so the
+// layout matches.
 type inputRecord struct {
 	EventType uint16
 	_         uint16 // padding before the union

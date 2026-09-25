@@ -33,7 +33,8 @@ func TestOpenRejectsNonTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pipe: %v", err)
 	}
-	t.Cleanup(func() { _ = r.Close(); _ = w.Close() })
+	closeAtEnd(t, r)
+	closeAtEnd(t, w)
 
 	tests := []struct {
 		name          string
@@ -209,7 +210,7 @@ func probeTTY(t *testing.T, slave *os.File) *os.File {
 	if err != nil {
 		t.Fatalf("reopen slave: %v", err)
 	}
-	t.Cleanup(func() { _ = probe.Close() })
+	closeAtEnd(t, probe)
 	return probe
 }
 
@@ -465,11 +466,7 @@ func TestRestoreConcurrentWithClose(t *testing.T) {
 func TestCloseRestoresAndUnblocksRead(t *testing.T) {
 	_, slave := openPTY(t)
 	// A second descriptor on the same terminal to inspect it after Close.
-	probe, err := os.OpenFile(slave.Name(), os.O_RDWR|unix.O_NOCTTY, 0)
-	if err != nil {
-		t.Fatalf("reopen slave: %v", err)
-	}
-	t.Cleanup(func() { _ = probe.Close() })
+	probe := probeTTY(t, slave)
 	before := termios(t, probe)
 
 	c := openThroughPath(t, slave)
