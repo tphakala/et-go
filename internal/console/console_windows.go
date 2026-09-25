@@ -331,13 +331,17 @@ func (c *Console) Size() (Size, error) {
 	return Size{Rows: int(w.Bottom-w.Top) + 1, Cols: int(w.Right-w.Left) + 1}, nil
 }
 
-// Resizes yields the window size each time it changes, until ctx ends or
-// the loop body stops. Changes are measured against the size when Resizes
-// is called, which is not yielded itself; callers read it with Size. The
-// window is polled every 200 ms: window resize events are always filtered
-// by ReadConsole (Microsoft docs, SetConsoleMode remarks). Nothing is
-// yielded once ctx has ended, even a change made before it ended. Range
-// over the result once.
+// Resizes yields the window size each time it changes, until ctx ends, the
+// Console is closed, or the loop body stops. Changes are measured against
+// the size when Resizes is called, which is not yielded itself; callers
+// read it with Size. The window is polled every 200 ms: window resize
+// events are always filtered by ReadConsole (Microsoft docs, SetConsoleMode
+// remarks). Nothing is yielded once ctx has ended, even a change made
+// before it ended. Range over the result once.
+//
+// The sequence ends when ctx ends or the Console is closed. It notices a
+// Close at the next poll. On Unix the next SIGWINCH notices it instead, or
+// the start of ranging if the Console was closed before that.
 func (c *Console) Resizes(ctx context.Context) iter.Seq[Size] {
 	last, _ := c.Size()
 	return func(yield func(Size) bool) {
@@ -350,6 +354,9 @@ func (c *Console) Resizes(ctx context.Context) iter.Seq[Size] {
 			case <-tick.C:
 			}
 			sz, err := c.Size()
+			if errors.Is(err, os.ErrClosed) {
+				return
+			}
 			if err != nil || sz == last {
 				continue
 			}

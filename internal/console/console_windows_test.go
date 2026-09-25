@@ -1,6 +1,7 @@
 package console
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -295,6 +296,56 @@ func TestOpenWithoutConsoleKeepsCause(t *testing.T) {
 	}
 	if _, ok := errors.AsType[windows.Errno](err); !ok {
 		t.Fatalf("Open error = %v, want it to wrap the Windows error that caused it", err)
+	}
+}
+
+// rangeResizes ranges over c.Resizes(ctx) on its own goroutine and closes
+// the returned channel when the range statement finishes. Any size yielded
+// fails the test: these Consoles have no window to resize.
+func rangeResizes(t *testing.T, c *Console, ctx context.Context) <-chan struct{} {
+	t.Helper()
+	done := make(chan struct{})
+	resizes := c.Resizes(ctx)
+	go func() {
+		defer close(done)
+		for sz := range resizes {
+			t.Errorf("Resizes yielded %+v, want nothing", sz)
+		}
+	}()
+	return done
+}
+
+// TestResizesEndsAfterClose needs no console: once the Console is closed,
+// the next poll ends the range while ctx is still live.
+func TestResizesEndsAfterClose(t *testing.T) {
+	c := newConsole(0, 0)
+	_ = c.Close()
+	done := rangeResizes(t, c, t.Context())
+	select {
+	case <-done:
+	case <-time.After(consoleFreeWait):
+		t.Fatal("the range over Resizes did not end after Close")
+	}
+}
+
+// TestResizesKeepsPollingOnOtherErrors needs no console: a Size error other
+// than a closed Console (here the zero handles are invalid) does not end
+// the range; only ctx does.
+func TestResizesKeepsPollingOnOtherErrors(t *testing.T) {
+	c := newConsole(0, 0)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := rangeResizes(t, c, ctx)
+	select {
+	case <-done:
+		t.Fatal("the range over Resizes ended on a Size error that is not a Close")
+	case <-time.After(3 * resizePoll):
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(consoleFreeWait):
+		t.Fatal("the range over Resizes did not end after ctx was cancelled")
 	}
 }
 

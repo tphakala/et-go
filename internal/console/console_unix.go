@@ -186,14 +186,21 @@ func (c *Console) Size() (Size, error) {
 	}, nil
 }
 
-// Resizes yields the window size each time it changes, until ctx ends or
-// the loop body stops. Changes are measured against the size when Resizes
-// is called, which is not yielded itself; callers read it with Size. A
-// change that happens before ranging starts is still caught: SIGWINCH
-// registration and the first comparison against the call-time size both
-// happen as soon as the returned sequence starts running, so no resize can
-// fall in the gap. Nothing is yielded once ctx has ended, even a change
-// made before it ended. Range over the result once.
+// Resizes yields the window size each time it changes, until ctx ends, the
+// Console is closed, or the loop body stops. Changes are measured against
+// the size when Resizes is called, which is not yielded itself; callers
+// read it with Size. A change that happens before ranging starts is still
+// caught: SIGWINCH registration and the first comparison against the
+// call-time size both happen as soon as the returned sequence starts
+// running, so no resize can fall in the gap. Nothing is yielded once ctx
+// has ended, even a change made before it ended. Range over the result
+// once.
+//
+// The sequence ends when ctx ends or the Console is closed. It notices a
+// Close when it next reads the size: at once if the Console was closed
+// before ranging started, otherwise at the next SIGWINCH, since the loop
+// wakes only on that signal and on ctx. On Windows the next poll notices
+// it instead.
 func (c *Console) Resizes(ctx context.Context) iter.Seq[Size] {
 	last, _ := c.Size()
 	return func(yield func(Size) bool) {
@@ -205,7 +212,11 @@ func (c *Console) Resizes(ctx context.Context) iter.Seq[Size] {
 		// would otherwise be lost: SIGWINCH is ignored by default, so a
 		// signal that fires in that gap never reaches sig. Check once,
 		// right after registering, so such a change is still caught.
-		if sz, err := c.Size(); err == nil && sz != last {
+		sz, err := c.Size()
+		if errors.Is(err, os.ErrClosed) {
+			return
+		}
+		if err == nil && sz != last {
 			last = sz
 			if ctx.Err() != nil || !yield(sz) {
 				return
@@ -219,6 +230,9 @@ func (c *Console) Resizes(ctx context.Context) iter.Seq[Size] {
 			case <-sig:
 			}
 			sz, err := c.Size()
+			if errors.Is(err, os.ErrClosed) {
+				return
+			}
 			if err != nil || sz == last {
 				continue
 			}

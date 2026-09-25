@@ -753,6 +753,85 @@ func TestResizesStopsWhenConsumerBreaks(t *testing.T) {
 	}
 }
 
+// TestResizesEndsAfterClose checks that the range over Resizes ends once
+// the Console is closed while ctx is still live: at the start of ranging
+// when Close ran before it, and at the next SIGWINCH when Close runs while
+// the signal loop waits.
+func TestResizesEndsAfterClose(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// inLoop closes only after ranging has run for a while, so the
+		// signal loop, not the post-registration check, sees the Close.
+		inLoop bool
+	}{
+		{name: "closed_before_ranging"},
+		{name: "signal_loop", inLoop: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, slave := openPTY(t)
+			c := mustConsole(t, slave)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel() // ctx stays live until the test has checked
+			resizes := c.Resizes(ctx)
+			if !tc.inLoop {
+				if err := c.Close(); err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+			}
+
+			sizes := make(chan Size, 4)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				for sz := range resizes {
+					sizes <- sz
+				}
+			}()
+
+			if tc.inLoop {
+				// Signal an unchanged size for 300 ms so the iterator has
+				// certainly registered and is waiting in the signal loop,
+				// as in TestResizesYieldsChangesOnly, then close.
+				if winchUntil(t, done, 300*time.Millisecond) {
+					t.Fatal("the range over Resizes ended before Close")
+				}
+				if err := c.Close(); err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+				// The loop sees the Close only when a signal wakes it.
+				if !winchUntil(t, done, waitTimeout) {
+					t.Fatal("the range over Resizes did not end after Close")
+				}
+			}
+			waitDone(t, done, "Resizes after Close")
+			if len(sizes) != 0 {
+				t.Fatalf("Resizes yielded %+v around Close, want nothing", <-sizes)
+			}
+		})
+	}
+}
+
+// winchUntil sends this process SIGWINCH every 20 ms until done is closed,
+// which it reports as true, or d passes, which it reports as false.
+func winchUntil(t *testing.T, done <-chan struct{}, d time.Duration) bool {
+	t.Helper()
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	deadline := time.After(d)
+	for {
+		if err := unix.Kill(os.Getpid(), unix.SIGWINCH); err != nil {
+			t.Fatalf("kill: %v", err)
+		}
+		select {
+		case <-done:
+			return true
+		case <-tick.C:
+		case <-deadline:
+			return false
+		}
+	}
+}
+
 func setWinsize(t *testing.T, f *os.File, ws *unix.Winsize) {
 	t.Helper()
 	if err := controlFile(f, func(fd int) error {
