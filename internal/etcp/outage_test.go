@@ -54,7 +54,14 @@ func TestLongOutage(t *testing.T) {
 		if err := srv.Send(t.Context(), numbered(0, 10)); err != nil {
 			t.Fatalf("Send: %v", err)
 		}
+		// 500 refused dials take about 40 minutes of fake time at the 5 s
+		// backoff cap: a long outage by any measure. The deadline turns a
+		// backoff that stopped dialing into a failure instead of a hang.
+		deadline := time.Now().Add(2 * time.Hour)
 		for nw.Dials() < 501 {
+			if time.Now().After(deadline) {
+				t.Fatalf("only %d dials in two hours of outage", nw.Dials())
+			}
 			synctest.Sleep(5 * time.Second)
 		}
 		nw.SetRefuse(false)

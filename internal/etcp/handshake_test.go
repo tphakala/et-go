@@ -125,7 +125,10 @@ func TestRedialStatusIsFatal(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				s := &scripted{handle: func(i int, c *rawServer) {
 					if i == 0 {
-						c.acceptFrames(0) // accept, then drop the link
+						// Accept, then drop the link after the test's first
+						// packet: closing at once would race Dial's own
+						// SetDeadline on the pipe.
+						c.acceptFrames(1)
 						return
 					}
 					_ = c.respond(tt.status)
@@ -139,6 +142,9 @@ func TestRedialStatusIsFatal(t *testing.T) {
 					_ = conn.Close()
 					s.wg.Wait()
 				}()
+				if err := conn.WritePacket(t.Context(), numbered(0, 10)); err != nil {
+					t.Fatalf("WritePacket: %v", err)
+				}
 				ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 				defer cancel()
 				if _, err := conn.ReadPacket(ctx); !errors.Is(err, tt.want) {

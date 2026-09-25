@@ -22,7 +22,7 @@ func TestSessionEndedIsEOF(t *testing.T) {
 		h := newHarness(t, etcp.Dialer{})
 		defer h.close()
 		h.srv.EndSession()
-		_, err := h.conn.ReadPacket(t.Context())
+		_, err := readPacket(t, h.conn)
 		if !errors.Is(err, etcp.ErrSessionEnded) || !errors.Is(err, io.EOF) {
 			t.Fatalf("ReadPacket = %v, want ErrSessionEnded wrapping io.EOF", err)
 		}
@@ -205,7 +205,7 @@ func TestIntegrityFailureIsFatal(t *testing.T) {
 			_ = conn.Close()
 			s.wg.Wait()
 		}()
-		if _, err := conn.ReadPacket(t.Context()); !errors.Is(err, etcp.ErrIntegrity) {
+		if _, err := readPacket(t, conn); !errors.Is(err, etcp.ErrIntegrity) {
 			t.Fatalf("ReadPacket = %v, want ErrIntegrity", err)
 		}
 		synctest.Sleep(time.Minute)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -45,7 +46,7 @@ func TestCloseEndsReadsAndWrites(t *testing.T) {
 		if err := h.conn.Close(); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
-		if _, err := h.conn.ReadPacket(t.Context()); !errors.Is(err, net.ErrClosed) {
+		if _, err := readPacket(t, h.conn); !errors.Is(err, net.ErrClosed) {
 			t.Fatalf("ReadPacket after Close = %v, want net.ErrClosed", err)
 		}
 		if err := h.conn.WritePacket(t.Context(), numbered(0, 10)); !errors.Is(err, net.ErrClosed) {
@@ -175,7 +176,7 @@ func TestSessionEndDeliversLastOutput(t *testing.T) {
 		if err := expectNumbered(t.Context(), 20, h.conn.ReadPacket); err != nil {
 			t.Fatalf("last output: %v", err)
 		}
-		if _, err := h.conn.ReadPacket(t.Context()); !errors.Is(err, etcp.ErrSessionEnded) {
+		if _, err := readPacket(t, h.conn); !errors.Is(err, etcp.ErrSessionEnded) {
 			t.Fatalf("after last output: %v, want ErrSessionEnded", err)
 		}
 	})
@@ -252,21 +253,77 @@ func TestReconnectSurvivesCutsAnywhere(t *testing.T) {
 
 // A backlog larger than one link write batch is sent across several batches
 // with nothing skipped or repeated.
+//
+// The server holds its first read until every packet is queued, so the
+// writer's first Write blocks while the rest pile up behind it and at least
+// one later batch must stop short of the backlog (100 frames of 2070 bytes
+// do not fit one 64 KiB batch), whatever the scheduling.
 func TestBacklogSpansWriteBatches(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		h := newHarness(t, etcp.Dialer{})
-		defer h.close()
-
-		const n = 100 // 100 packets of 2 KiB: about three 64 KiB batches
+		const n = 100
+		release := make(chan struct{})
+		got := make(chan []int, 1)
+		s := &scripted{handle: func(i int, c *rawServer) {
+			if i != 0 || c.respond(protocol.ConnectStatus_NEW_CLIENT) != nil {
+				return
+			}
+			<-release
+			var nums []int
+			for len(nums) < n {
+				frame, err := wire.ReadFrame(c.br, nil)
+				if err != nil {
+					break
+				}
+				p, err := c.open(frame)
+				if err != nil {
+					break
+				}
+				k, err := number(p)
+				if err != nil {
+					break
+				}
+				nums = append(nums, k)
+			}
+			got <- nums
+			c.drain()
+		}}
+		d := etcp.Dialer{NetDialer: s}
+		conn, err := d.Dial(t.Context(), testAddr, testID, testKey)
+		if err != nil {
+			t.Fatalf("Dial: %v", err)
+		}
+		defer func() {
+			_ = conn.Close()
+			s.wg.Wait()
+		}()
+		var releaseOnce sync.Once
+		releaseServer := func() { releaseOnce.Do(func() { close(release) }) }
+		defer releaseServer() // runs first, so an early failure cannot strand s.wg.Wait
+		ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
+		defer cancel()
 		for i := range n {
-			if err := h.conn.WritePacket(t.Context(), numbered(i, 2048)); err != nil {
+			if err := conn.WritePacket(ctx, numbered(i, 2048)); err != nil {
 				t.Fatalf("WritePacket: %v", err)
 			}
 		}
-		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
-		defer cancel()
-		if err := expectNumbered(ctx, n, h.srv.Recv); err != nil {
-			t.Fatalf("server side: %v", err)
+		synctest.Wait()
+		releaseServer()
+
+		select {
+		case nums := <-got:
+			for i, k := range nums {
+				if k != i {
+					t.Fatalf("server got packet %d at position %d (lost, duplicated or reordered)", k, i)
+				}
+			}
+			if len(nums) != n {
+				t.Fatalf("server got %d packets, want %d", len(nums), n)
+			}
+		case <-time.After(time.Minute):
+			t.Fatal("server never received the backlog")
+		}
+		if got := s.dials.Load(); got != 1 {
+			t.Fatalf("dials = %d, want 1", got)
 		}
 	})
 }

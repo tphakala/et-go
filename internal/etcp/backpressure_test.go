@@ -38,7 +38,7 @@ func TestBackpressureWaitEnds(t *testing.T) {
 		go func() { done <- h.conn.WritePacket(ctx, numbered(1, 10)) }()
 		synctest.Wait()
 		cancel(errCause)
-		if err := <-done; !errors.Is(err, errCause) {
+		if err := within(t, done); !errors.Is(err, errCause) {
 			t.Fatalf("blocked write after cancel = %v, want %v", err, errCause)
 		}
 
@@ -47,7 +47,7 @@ func TestBackpressureWaitEnds(t *testing.T) {
 		if err := h.conn.Close(); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
-		if err := <-done; !errors.Is(err, net.ErrClosed) {
+		if err := within(t, done); !errors.Is(err, net.ErrClosed) {
 			t.Fatalf("blocked write after Close = %v, want net.ErrClosed", err)
 		}
 	})
@@ -81,7 +81,7 @@ func TestBackpressureWhileDisconnected(t *testing.T) {
 		}
 
 		h.net.SetRefuse(false)
-		if err := <-done; err != nil {
+		if err := within(t, done); err != nil {
 			t.Fatalf("fifth write after reconnect: %v", err)
 		}
 		if err := expectNumbered(t.Context(), 5, h.srv.Recv); err != nil {

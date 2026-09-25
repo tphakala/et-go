@@ -74,8 +74,16 @@ func number(p protocol.Packet) (int, error) {
 
 // expectNumbered reads packets, skipping keepalives, and checks that 0..n-1
 // arrive in order, none lost or duplicated up to n-1. It stops there, so a
-// duplicate after the last packet needs expectNothingMore.
+// duplicate after the last packet needs expectNothingMore. Without a deadline
+// on ctx it waits at most an hour: in a synctest bubble a reconnect loop keeps
+// fake time moving, so an unbounded wait would hang the suite instead of
+// failing the test.
 func expectNumbered(ctx context.Context, n int, recv func(context.Context) (protocol.Packet, error)) error {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Hour)
+		defer cancel()
+	}
 	for want := 0; want < n; {
 		p, err := recv(ctx)
 		if err != nil {
@@ -114,6 +122,29 @@ func expectNothingMore(ctx context.Context, recv func(context.Context) (protocol
 			return fmt.Errorf("unexpected packet %d after the last one (duplicated)", n)
 		}
 	}
+}
+
+// within returns the next value from ch, failing the test if none arrives in
+// an hour of fake time, so a regression that strands a goroutine fails on an
+// assertion instead of hanging the suite.
+func within[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(time.Hour):
+		t.Fatal("no result within an hour")
+		var zero T
+		return zero
+	}
+}
+
+// readPacket is conn.ReadPacket bounded to an hour of fake time.
+func readPacket(t *testing.T, conn *etcp.Conn) (protocol.Packet, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
+	defer cancel()
+	return conn.ReadPacket(ctx)
 }
 
 // scripted is a NetDialer whose server side is a test function, for server

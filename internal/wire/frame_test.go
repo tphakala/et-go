@@ -159,14 +159,32 @@ func TestReadFrameTruncated(t *testing.T) {
 	}
 }
 
+// FuzzReadFrame checks ReadFrame against the framing itself: on success the
+// body is exactly the bytes after the 4-byte length, and reading the same
+// input into a reused buffer, a small one or one that already holds bytes,
+// gives the same body or the same error.
 func FuzzReadFrame(f *testing.F) {
-	f.Add([]byte{0, 0, 0, 3, 1, 2, 3})
-	f.Add([]byte{0xff, 0xff, 0xff, 0xff})
-	f.Add([]byte{})
-	f.Fuzz(func(t *testing.T, in []byte) {
+	f.Add([]byte{0, 0, 0, 3, 1, 2, 3}, 0)
+	f.Add([]byte{0xff, 0xff, 0xff, 0xff}, 2)
+	f.Add([]byte{}, 64)
+	// 96 KiB declared: past the first 64 KiB grow chunk, with a body pattern
+	// that shows any bytes written at the wrong offset.
+	f.Add(append([]byte{0, 1, 0x80, 0}, bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7}, 14100)...), 100)
+	f.Fuzz(func(t *testing.T, in []byte, capacity int) {
 		got, err := ReadFrame(bytes.NewReader(in), nil)
-		if err == nil && len(got) > MaxFrameSize {
-			t.Fatalf("ReadFrame returned %d bytes, above MaxFrameSize", len(got))
+		if err == nil {
+			if len(in) < 4 {
+				t.Fatalf("ReadFrame succeeded on %d input bytes", len(in))
+			}
+			n := int(binary.BigEndian.Uint32(in))
+			if n > MaxFrameSize || !bytes.Equal(got, in[4:4+n]) {
+				t.Fatalf("ReadFrame body of %d bytes does not match the %d declared", len(got), n)
+			}
+		}
+		scratch := bytes.Repeat([]byte{0xee}, max(capacity, 0)%(1<<17))
+		again, err2 := ReadFrame(bytes.NewReader(in), scratch)
+		if (err == nil) != (err2 == nil) || !bytes.Equal(got, again) {
+			t.Fatalf("reused buffer (cap %d): got %d bytes, %v; fresh: %d bytes, %v", cap(scratch), len(again), err2, len(got), err)
 		}
 	})
 }

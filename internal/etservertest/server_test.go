@@ -6,6 +6,7 @@ import (
 	"net"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/tphakala/et-go/internal/etservertest"
 	"github.com/tphakala/et-go/internal/protocol"
@@ -144,6 +145,50 @@ func TestServerRejects(t *testing.T) {
 			})
 		})
 	}
+}
+
+// Upstream writes each recover message before reading the peer's
+// (src/base/Connection.cpp:105-143 at et-v7.0.0); etcp's deadlock test
+// (TestCatchupBothWays) only means something if the fake does the same. A
+// client that reads each server message before writing its own must get
+// both; a fake that read first would leave these reads to time out.
+func TestServerRecoverWritesCatchupFirst(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		srv := etservertest.NewServer(testID, testKey)
+		n := etservertest.NewNetwork(srv)
+		defer n.Close()
+
+		connect(t, n, testID, protocol.Version) // registers the client
+		if err := srv.Send(t.Context(), protocol.Packet{Header: protocol.HeaderTerminalBuffer, Payload: []byte("owed")}); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		n.CutAll()
+
+		c, resp := connect(t, n, testID, protocol.Version)
+		if got := resp.GetStatus(); got != protocol.ConnectStatus_RETURNING_CLIENT {
+			t.Fatalf("status = %v, want RETURNING_CLIENT", got)
+		}
+		if err := c.conn.SetReadDeadline(time.Now().Add(time.Minute)); err != nil {
+			t.Fatalf("SetReadDeadline: %v", err)
+		}
+		var seq protocol.SequenceHeader
+		if err := wire.ReadMessage(c.br, &seq); err != nil {
+			t.Fatalf("server SequenceHeader before ours: %v", err)
+		}
+		if err := wire.WriteMessage(c.conn, &protocol.SequenceHeader{}); err != nil {
+			t.Fatalf("write SequenceHeader: %v", err)
+		}
+		var cb protocol.CatchupBuffer
+		if err := wire.ReadMessage(c.br, &cb); err != nil {
+			t.Fatalf("server CatchupBuffer before ours: %v", err)
+		}
+		if got := len(cb.GetBuffer()); got != 1 {
+			t.Fatalf("server catchup holds %d packets, want the 1 it owes", got)
+		}
+		if err := wire.WriteMessage(c.conn, &protocol.CatchupBuffer{}); err != nil {
+			t.Fatalf("write CatchupBuffer: %v", err)
+		}
+	})
 }
 
 func TestServerEndSessionFlushesThenCloses(t *testing.T) {
