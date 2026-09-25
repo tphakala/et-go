@@ -236,8 +236,9 @@ func (c *tcpStyleConn) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// The deadline setters need the same relabelling: idleConn sets a deadline
-// before every Read and Write, so on a closed conn the setter fails first.
+// The deadline setters are relabelled too, for fidelity only: idleConn calls
+// them around every Read and Write, but a recover test whose stuck operation
+// is a Write sees the relabelled Write error, not a setter's.
 func (c *tcpStyleConn) SetDeadline(t time.Time) error {
 	return c.relabel(c.Conn.SetDeadline(t))
 }

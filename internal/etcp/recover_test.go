@@ -13,6 +13,7 @@ import (
 	"github.com/tphakala/et-go/internal/etcp"
 	"github.com/tphakala/et-go/internal/protocol"
 	"github.com/tphakala/et-go/internal/wire"
+	"golang.org/x/crypto/nacl/secretbox"
 )
 
 func TestSessionEndedIsEOF(t *testing.T) {
@@ -225,64 +226,86 @@ func TestIntegrityFailureIsFatal(t *testing.T) {
 // A packet written after the recover snapshot is not in our catchup, so the
 // new link must send it. Reading ring.next() a second time at the end of the
 // exchange would skip it.
+//
+// In the second row the packets written during recovery exceed ReplayLimit,
+// so recover's trim must stop at the snapshot: trimming past it would drop
+// packets no link has sent.
 func TestWritePacketRacingRecovery(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		snapped := make(chan struct{})
-		resume := make(chan struct{})
-		got := make(chan int, 1)
-		s := &scripted{handle: func(i int, c *rawServer) {
-			switch i {
-			case 0:
-				c.acceptFrames(1) // take packet 0 off the wire, then drop the link
-			case 1:
-				c.pausedRecover(snapped, resume, got)
-			default:
-				// Later links (the watcher may redial, since drain never
-				// echoes probes) end at once; got already holds packet 1's
-				// number, so they cannot change the verdict.
-			}
-		}}
-		d := etcp.Dialer{NetDialer: s}
-		conn, err := d.Dial(t.Context(), testAddr, testID, testKey)
-		if err != nil {
-			t.Fatalf("Dial: %v", err)
-		}
-		defer func() {
-			_ = conn.Close()
-			s.wg.Wait()
-		}()
-		if err := conn.WritePacket(t.Context(), numbered(0, 10)); err != nil {
-			t.Fatalf("WritePacket 0: %v", err)
-		}
-		<-snapped
-		if err := conn.WritePacket(t.Context(), numbered(1, 10)); err != nil {
-			t.Fatalf("WritePacket 1: %v", err)
-		}
-		close(resume)
+	tests := []struct {
+		name   string
+		limit  int
+		during int // packets written between the snapshot and resume
+	}{
+		{name: "one packet", during: 1},
+		{name: "more than ReplayLimit", limit: 64, during: 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				snapped := make(chan struct{})
+				resume := make(chan struct{})
+				got := make(chan int, 1)
+				s := &scripted{handle: func(i int, c *rawServer) {
+					switch i {
+					case 0:
+						c.acceptFrames(1) // take packet 0 off the wire, then drop the link
+					case 1:
+						c.pausedRecover(snapped, resume, got)
+					default:
+						// Later links (the watcher may redial, since drain
+						// never echoes probes) end at once; got already holds
+						// packet 1's number, so they cannot change the verdict.
+					}
+				}}
+				d := etcp.Dialer{NetDialer: s, ReplayLimit: tt.limit}
+				conn, err := d.Dial(t.Context(), testAddr, testID, testKey)
+				if err != nil {
+					t.Fatalf("Dial: %v", err)
+				}
+				defer func() {
+					_ = conn.Close()
+					s.wg.Wait()
+				}()
+				if err := conn.WritePacket(t.Context(), numbered(0, 10)); err != nil {
+					t.Fatalf("WritePacket 0: %v", err)
+				}
+				<-snapped
+				for i := 1; i <= tt.during; i++ {
+					if err := conn.WritePacket(t.Context(), numbered(i, 10)); err != nil {
+						t.Fatalf("WritePacket %d: %v", i, err)
+					}
+				}
+				close(resume)
 
-		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
-		defer cancel()
-		select {
-		case n := <-got:
-			if n != 1 {
-				t.Fatalf("new link sent packet %d first, want 1", n)
-			}
-		case <-ctx.Done():
-			t.Fatal("packet written during recovery never arrived")
-		}
-	})
+				ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+				defer cancel()
+				select {
+				case n := <-got:
+					if n != 1 {
+						t.Fatalf("new link sent packet %d first, want 1", n)
+					}
+				case <-ctx.Done():
+					t.Fatal("packet written during recovery never arrived")
+				}
+			})
+		})
+	}
 }
 
 // A link that recovers and then dies before writing anything must not let the
 // replay ring grow past ReplayLimit: recover counts our catchup as sent, which
 // frees WritePacket to admit another ReplayLimit of packets, so recover must
-// also trim what the server has now received. The server here reports its
+// also trim what it has now written. The server here reports its
 // true received count in each SequenceHeader and drops every link right after
 // the exchange, while the caller keeps writing.
 func TestFlappingLinkKeepsRingBounded(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		const limit = 1 << 10
-		var received atomic.Int32
+		const (
+			limit   = 1 << 10
+			payload = 100
+			sealed  = 2 + secretbox.Overhead + payload // one ring entry
+		)
+		var received, caughtUp atomic.Int32
 		s := &scripted{handle: func(i int, c *rawServer) {
 			if i == 0 {
 				if c.respond(protocol.ConnectStatus_NEW_CLIENT) != nil {
@@ -310,6 +333,7 @@ func TestFlappingLinkKeepsRingBounded(t *testing.T) {
 				return
 			}
 			received.Add(int32(len(theirs.GetBuffer())))
+			caughtUp.Add(int32(len(theirs.GetBuffer())))
 			_ = wire.WriteMessage(c.conn, &protocol.CatchupBuffer{})
 		}}
 		d := etcp.Dialer{NetDialer: s, ReplayLimit: limit}
@@ -325,20 +349,26 @@ func TestFlappingLinkKeepsRingBounded(t *testing.T) {
 		}()
 		wg.Go(func() {
 			for i := 0; ; i++ {
-				if conn.WritePacket(t.Context(), numbered(i, 100)) != nil {
+				if conn.WritePacket(t.Context(), numbered(i, payload)) != nil {
 					return
 				}
 			}
 		})
+		// Cap the wait in fake time: a regression that ends the Conn stops
+		// the redials, and an uncapped loop would hang the suite.
+		deadline := time.Now().Add(time.Hour)
 		for s.dials.Load() < 12 {
+			if time.Now().After(deadline) {
+				t.Fatalf("only %d dials after an hour", s.dials.Load())
+			}
 			time.Sleep(time.Second)
 		}
-		if received.Load() == 0 {
+		if caughtUp.Load() == 0 {
 			t.Fatal("no catchup reached the server; the test exercises nothing")
 		}
 		// At most ReplayLimit of written entries survive a trim, plus the
 		// unsent backlog WritePacket admits: ReplayLimit and one packet.
-		if got, bound := etcp.RingBytes(conn), 2*limit+256; got > bound {
+		if got, bound := etcp.RingBytes(conn), 2*limit+sealed; got > bound {
 			t.Fatalf("ring holds %d bytes after %d links, want at most %d", got, s.dials.Load(), bound)
 		}
 	})
