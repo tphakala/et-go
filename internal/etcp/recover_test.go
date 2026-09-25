@@ -287,6 +287,12 @@ func TestWritePacketRacingRecovery(t *testing.T) {
 				case <-ctx.Done():
 					t.Fatal("packet written during recovery never arrived")
 				}
+				// The new link has sent everything, so recover must have
+				// counted the packets written during it exactly once.
+				synctest.Wait()
+				if got := etcp.Unsent(conn); got != 0 {
+					t.Fatalf("unsent = %d bytes after the link drained, want 0", got)
+				}
 			})
 		})
 	}
@@ -305,7 +311,7 @@ func TestFlappingLinkKeepsRingBounded(t *testing.T) {
 			payload = 100
 			sealed  = 2 + secretbox.Overhead + payload // one ring entry
 		)
-		var received, caughtUp atomic.Int32
+		var received, caughtUp, lastCatchup atomic.Int32
 		s := &scripted{handle: func(i int, c *rawServer) {
 			if i == 0 {
 				if c.respond(protocol.ConnectStatus_NEW_CLIENT) != nil {
@@ -334,6 +340,7 @@ func TestFlappingLinkKeepsRingBounded(t *testing.T) {
 			}
 			received.Add(int32(len(theirs.GetBuffer())))
 			caughtUp.Add(int32(len(theirs.GetBuffer())))
+			lastCatchup.Store(int32(len(theirs.GetBuffer())))
 			_ = wire.WriteMessage(c.conn, &protocol.CatchupBuffer{})
 		}}
 		d := etcp.Dialer{NetDialer: s, ReplayLimit: limit}
@@ -365,6 +372,11 @@ func TestFlappingLinkKeepsRingBounded(t *testing.T) {
 		}
 		if caughtUp.Load() == 0 {
 			t.Fatal("no catchup reached the server; the test exercises nothing")
+		}
+		// The caller writes between every pair of links, so an empty latest
+		// catchup means WritePacket stayed blocked: recover must release it.
+		if lastCatchup.Load() == 0 {
+			t.Fatal("writer stalled: the last recover carried no catchup")
 		}
 		// At most ReplayLimit of written entries survive a trim, plus the
 		// unsent backlog WritePacket admits: ReplayLimit and one packet.
