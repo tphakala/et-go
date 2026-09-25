@@ -946,6 +946,95 @@ func TestReadSmallBufferKeepsRest(t *testing.T) {
 	}
 }
 
+// TestReadEmptyBufferReturnsAtOnce needs no console: a Read with an empty p
+// returns 0, nil without reading the console, where it could block.
+func TestReadEmptyBufferReturnsAtOnce(t *testing.T) {
+	c := newConsole(0, 0)
+	scriptRead(t, c) // any console read fails the test
+	if n, err := c.Read(nil); n != 0 || err != nil {
+		t.Fatalf("Read(nil) = %d, %v; want 0, nil", n, err)
+	}
+	if n, err := c.Read([]byte{}); n != 0 || err != nil {
+		t.Fatalf("Read(empty) = %d, %v; want 0, nil", n, err)
+	}
+
+	// Once closed, even an empty Read reports the Close.
+	_ = c.Close()
+	if n, err := c.Read(nil); n != 0 || !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("Read(nil) after Close = %d, %v; want 0 and an error wrapping os.ErrClosed", n, err)
+	}
+}
+
+// TestSizeHoldsLockAgainstClose needs no console: a Size query in progress
+// when Close starts finishes before Close sets any mode or returns, and
+// Size after Close reports os.ErrClosed.
+func TestSizeHoldsLockAgainstClose(t *testing.T) {
+	c := newConsole(0, 0)
+	c.inBase, c.outBase = 0x1f7, 0x7
+	var querying atomic.Bool // set while the fake size query is in progress
+	var sets atomic.Int32
+	c.getModeFn = func(_ windows.Handle, mode *uint32) error {
+		*mode = 0 // differs from both baselines, so Close sets each
+		return nil
+	}
+	c.setModeFn = func(windows.Handle, uint32) error {
+		sets.Add(1)
+		if querying.Load() {
+			t.Error("Close set a console mode while Size was still querying")
+		}
+		return nil
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	c.sizeFn = func(_ windows.Handle, info *windows.ConsoleScreenBufferInfo) error {
+		querying.Store(true)
+		close(entered)
+		<-release
+		querying.Store(false)
+		info.Window = windows.SmallRect{Left: 0, Top: 0, Right: 79, Bottom: 23}
+		return nil
+	}
+
+	type result struct {
+		sz  Size
+		err error
+	}
+	sized := make(chan result, 1)
+	go func() {
+		sz, err := c.Size()
+		sized <- result{sz, err}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(waitTimeout):
+		t.Fatal("Size never queried the console")
+	}
+
+	closed := closeAsync(c)
+	select {
+	case <-closed:
+		close(release)
+		t.Fatal("Close returned while Size was still querying")
+	case <-time.After(stillRunning):
+	}
+	close(release)
+	select {
+	case r := <-sized:
+		if r.err != nil || r.sz != (Size{Rows: 24, Cols: 80}) {
+			t.Fatalf("Size = %+v, %v; want 24x80, nil", r.sz, r.err)
+		}
+	case <-time.After(waitTimeout):
+		t.Fatal("Size never returned")
+	}
+	_ = recv(t, closed, "Close")
+	if sets.Load() == 0 {
+		t.Fatal("Close set no console mode, so the test observed no ordering")
+	}
+	if _, err := c.Size(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("Size after Close = %v, want an error wrapping os.ErrClosed", err)
+	}
+}
+
 // TestReadRetriesEmptyRead needs no console: a console read that returns no
 // units does not end Read with zero bytes; Read reads again.
 func TestReadRetriesEmptyRead(t *testing.T) {

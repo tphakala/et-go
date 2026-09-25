@@ -103,10 +103,7 @@ func TestOpenWithoutControllingTerminal(t *testing.T) {
 
 func TestOpenAcceptsTerminal(t *testing.T) {
 	_, slave := openPTY(t)
-	c, err := open(slave.Name(), slave, slave)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
+	c := openThroughPath(t, slave)
 	if err := c.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}

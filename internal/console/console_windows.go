@@ -66,6 +66,10 @@ type Console struct {
 	getModeFn func(h windows.Handle, mode *uint32) error
 	setModeFn func(h windows.Handle, mode uint32) error
 
+	// sizeFn reads the screen buffer info for Size
+	// (GetConsoleScreenBufferInfo). nil means the real call.
+	sizeFn func(h windows.Handle, info *windows.ConsoleScreenBufferInfo) error
+
 	// Reader-owned state.
 	dec     utf16Decoder
 	units   []uint16
@@ -212,7 +216,8 @@ func (c *Console) setModeIfChanged(h windows.Handle, mode uint32) error {
 // Read reads raw VT input as UTF-8. Once Close has started, Read returns
 // os.ErrClosed, including a Read that was blocked and any bytes still
 // buffered from an earlier console read. A console read that returns no
-// units is retried.
+// units is retried. A Read with an empty p returns 0, nil at once without
+// reading the console.
 //
 // A generated Ctrl+Break does not end a pending read. MEASURED on win11-qa
 // under ConPTY (ssh -tt), 2026-09-25: with a handler that consumes
@@ -230,6 +235,11 @@ func (c *Console) Read(p []byte) (int, error) {
 		if c.closing {
 			c.mu.Unlock()
 			return 0, os.ErrClosed
+		}
+		if len(p) == 0 {
+			// Nothing to read into: do not block in the console.
+			c.mu.Unlock()
+			return 0, nil
 		}
 		if len(c.pending) > 0 {
 			c.mu.Unlock()
@@ -315,16 +325,21 @@ func (c *Console) Write(p []byte) (int, error) {
 
 // Size returns the visible window size in character cells. Windows does not
 // report pixel sizes, so Width and Height are 0. Once Close has started it
-// returns an error satisfying errors.Is(err, os.ErrClosed).
+// returns an error satisfying errors.Is(err, os.ErrClosed). Size holds the
+// Console lock for the whole query, and Close takes that lock to start, so
+// a Size that succeeds finished before Close started.
 func (c *Console) Size() (Size, error) {
 	c.mu.Lock()
-	closing := c.closing
-	c.mu.Unlock()
-	if closing {
+	defer c.mu.Unlock()
+	if c.closing {
 		return Size{}, fmt.Errorf("console: size: %w", os.ErrClosed)
 	}
+	query := c.sizeFn
+	if query == nil {
+		query = windows.GetConsoleScreenBufferInfo
+	}
 	var info windows.ConsoleScreenBufferInfo
-	if err := windows.GetConsoleScreenBufferInfo(c.out, &info); err != nil {
+	if err := query(c.out, &info); err != nil {
 		return Size{}, fmt.Errorf("console: size: %w", err)
 	}
 	w := info.Window
