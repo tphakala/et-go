@@ -52,6 +52,7 @@ type fakeConn struct {
 	startErr string
 	script   []protocol.Packet
 	in       chan protocol.Packet
+	keepOpen bool // true: do not end the session after the script
 }
 
 func newFakeConn(ev *events, startErr string, script ...protocol.Packet) *fakeConn {
@@ -71,7 +72,9 @@ func (c *fakeConn) WritePacket(ctx context.Context, p protocol.Packet) error {
 			for _, s := range c.script {
 				c.in <- s
 			}
-			close(c.in)
+			if !c.keepOpen {
+				close(c.in)
+			}
 		}
 	}
 	return nil
@@ -165,6 +168,13 @@ func testEnv(ev *events, con *fakeConsole, conn *fakeConn, bootErr error) env {
 		},
 		openConsole: func() (localConsole, error) { return con, nil },
 		getenv:      func(string) string { return "xterm-256color" },
+		onBreak: func(f func()) {
+			if f != nil {
+				ev.add("break on")
+			} else {
+				ev.add("break off")
+			}
+		},
 	}
 }
 
@@ -178,7 +188,7 @@ func TestRunExitStatusFlow(t *testing.T) {
 		if code != 7 {
 			t.Fatalf("exit code %d, want 7 (stderr %q)", code, stderr.String())
 		}
-		want := []string{"bootstrap me@box", "dial box:2022", "start", "raw", "console closed", "restored", "conn closed"}
+		want := []string{"bootstrap me@box", "dial box:2022", "start", "break on", "raw", "console closed", "restored", "break off", "conn closed"}
 		if got := ev.list(); !slices.Equal(got, want) {
 			t.Fatalf("events %q\nwant   %q", got, want)
 		}
@@ -206,6 +216,9 @@ func TestRunBootstrapFailureNeverGoesRaw(t *testing.T) {
 		if slices.Contains(ev.list(), "raw") {
 			t.Fatal("console went raw after a bootstrap failure")
 		}
+		if slices.Contains(ev.list(), "break on") {
+			t.Fatal("Ctrl+Break handler registered before a session existed")
+		}
 		if !slices.Contains(ev.list(), "console closed") {
 			t.Fatal("console not closed")
 		}
@@ -222,6 +235,38 @@ func TestRunStartRejectedNeverGoesRaw(t *testing.T) {
 		}
 		if slices.Contains(ev.list(), "raw") {
 			t.Fatal("console went raw after a rejected start")
+		}
+		if slices.Contains(ev.list(), "break on") {
+			t.Fatal("Ctrl+Break handler registered after a rejected start")
+		}
+	})
+}
+
+// TestRunBreakDuringSessionDetaches pins what the registered Ctrl+Break
+// handler does: while the session runs it ends et as a detach, exit status
+// 0 with the detach message.
+func TestRunBreakDuringSessionDetaches(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ev := &events{}
+		conn := newFakeConn(ev, "")
+		conn.keepOpen = true
+		e := testEnv(ev, newFakeConsole(ev), conn, nil)
+		var handler func()
+		e.onBreak = func(f func()) {
+			if f != nil {
+				handler = f
+			}
+		}
+		var stderr bytes.Buffer
+		done := make(chan int, 1)
+		go func() { done <- runWith(t.Context(), []string{"box"}, e, io.Discard, &stderr) }()
+		synctest.Wait()
+		if handler == nil {
+			t.Fatal("no Ctrl+Break handler registered while the session runs")
+		}
+		handler()
+		if code := <-done; code != 0 || !strings.Contains(stderr.String(), "Detached") {
+			t.Fatalf("exit code %d, stderr %q; want 0 and the detach message", code, stderr.String())
 		}
 	})
 }
@@ -272,7 +317,7 @@ func TestRunNewLoggerFailure(t *testing.T) {
 // environment) or succeeds and is closed.
 func TestDefaultEnvWiring(t *testing.T) {
 	e := defaultEnv()
-	if e.bootstrap == nil || e.resolveHost == nil || e.dial == nil || e.openConsole == nil || e.getenv == nil {
+	if e.bootstrap == nil || e.resolveHost == nil || e.dial == nil || e.openConsole == nil || e.getenv == nil || e.onBreak == nil {
 		t.Fatal("defaultEnv left a dependency nil")
 	}
 

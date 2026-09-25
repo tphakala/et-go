@@ -43,6 +43,7 @@ type env struct {
 	dial        func(ctx context.Context, d *etcp.Dialer, addr string, creds bootstrap.Credentials) (sessionConn, error)
 	openConsole func() (localConsole, error)
 	getenv      func(string) string
+	onBreak     func(func())
 }
 
 func defaultEnv() env {
@@ -65,7 +66,8 @@ func defaultEnv() env {
 			}
 			return c, nil
 		},
-		getenv: os.Getenv,
+		getenv:  os.Getenv,
+		onBreak: onBreak,
 	}
 }
 
@@ -108,8 +110,6 @@ func runWith(ctx context.Context, args []string, e env, stdout, stderr io.Writer
 func connect(ctx context.Context, o *options, e env, log *slog.Logger) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
-	onBreak(func() { cancel(session.ErrDetached) })
-	defer onBreak(nil)
 
 	con, err := e.openConsole()
 	if err != nil {
@@ -151,6 +151,12 @@ func connect(ctx context.Context, o *options, e env, log *slog.Logger) error {
 	if err := session.Start(ctx, conn, opts); err != nil {
 		return err
 	}
+	// A session exists from here on, so Ctrl+Break detaches from it. Before
+	// this point Ctrl+Break reaches the Go runtime's handler, which delivers
+	// os.Interrupt to the signal context: the connect is aborted, not
+	// reported as a detach.
+	e.onBreak(func() { cancel(session.ErrDetached) })
+	defer e.onBreak(nil)
 
 	restore, err := con.MakeRaw()
 	if err != nil {
