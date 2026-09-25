@@ -22,11 +22,15 @@ func TestRingNextCountsPushes(t *testing.T) {
 
 func TestRingTrimKeepsUnsent(t *testing.T) {
 	r := filledRing(25, 10, 10) // 100 bytes held, limit 25
-	r.trim(4)                   // entries 0..3 were written; 4..9 were not
-	if r.first != 4 {
-		t.Fatalf("first = %d, want 4 (never trim unsent entries)", r.first)
+	r.trim(4, 60)               // entries 0..3 were written; 4..9 (60 bytes) were not
+	if r.first != 2 {
+		t.Fatalf("first = %d, want 2 (trim written bytes to the limit, ignoring the backlog)", r.first)
 	}
-	r.trim(10)
+	r.trim(4, 60) // the written 20 bytes are already within the limit
+	if r.first != 2 {
+		t.Fatalf("first = %d after a second trim, want 2", r.first)
+	}
+	r.trim(10, 0)
 	if r.first != 8 || r.bytes != 20 {
 		t.Fatalf("first, bytes = %d, %d; want 8, 20", r.first, r.bytes)
 	}
@@ -34,7 +38,7 @@ func TestRingTrimKeepsUnsent(t *testing.T) {
 
 func TestRingSince(t *testing.T) {
 	r := filledRing(25, 10, 10)
-	r.trim(10) // retains 8 and 9
+	r.trim(10, 0) // retains 8 and 9
 	tests := []struct {
 		name string
 		from int64

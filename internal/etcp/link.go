@@ -162,7 +162,7 @@ func (c *Conn) writeLoop(ctx context.Context, w io.Writer) error {
 		c.mu.Lock()
 		c.flushed += int64(sent)
 		c.unsent -= n
-		c.ring.trim(c.flushed)
+		c.ring.trim(c.flushed, c.unsent)
 		room := c.unsent <= c.limit
 		c.mu.Unlock()
 		if room {

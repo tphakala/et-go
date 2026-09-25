@@ -112,7 +112,7 @@ func (c *Conn) recover(conn net.Conn) ([][]byte, error) {
 	// Trim as writeLoop does after a Write: a link that dies before its
 	// first Write would otherwise leave the catchup in the ring while
 	// WritePacket admits another ReplayLimit.
-	c.ring.trim(c.flushed)
+	c.ring.trim(c.flushed, c.unsent)
 	room := c.unsent <= c.limit
 	c.mu.Unlock()
 	if room {

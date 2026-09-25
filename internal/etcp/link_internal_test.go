@@ -40,3 +40,59 @@ func TestWriteLoopShortWrite(t *testing.T) {
 		}
 	})
 }
+
+// backlogWriter accepts its first Write, during which the caller fills the
+// unsent backlog as a racing WritePacket would, then blocks until ctx ends.
+type backlogWriter struct {
+	ctx    context.Context
+	c      *Conn
+	writes int
+}
+
+func (w *backlogWriter) Write(p []byte) (int, error) {
+	w.writes++
+	if w.writes > 1 {
+		<-w.ctx.Done()
+		return 0, w.ctx.Err()
+	}
+	w.c.mu.Lock()
+	for range 5 {
+		w.c.ring.push(make([]byte, 20))
+		w.c.unsent += 20
+	}
+	w.c.mu.Unlock()
+	return len(p), nil
+}
+
+// The replay limit applies to written packets and to the unsent backlog
+// separately: a full backlog must not trim the replay copies of packets just
+// written, which may still be in flight and are needed after a cut.
+func TestWriteLoopKeepsWrittenWhileBacklogFull(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		d := Dialer{ReplayLimit: 100}
+		c := d.newConn("et.example:2022", "XXXtestclient001", strings.Repeat("k", 32))
+		defer c.cancel(nil)
+		for range 5 { // 100 bytes to write, exactly the limit
+			c.ring.push(make([]byte, 20))
+			c.unsent += 20
+		}
+
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- c.writeLoop(ctx, &backlogWriter{ctx: ctx, c: c}) }()
+		synctest.Wait() // the first batch is written, the second is stuck
+
+		c.mu.Lock()
+		first, flushed, unsent := c.ring.first, c.flushed, c.unsent
+		c.mu.Unlock()
+		if flushed != 5 || unsent != 100 {
+			t.Fatalf("flushed, unsent = %d, %d; want 5, 100", flushed, unsent)
+		}
+		if first != 0 {
+			t.Fatalf("ring.first = %d, want 0: the 100 written bytes are within the limit", first)
+		}
+		cancel()
+		<-done
+	})
+}

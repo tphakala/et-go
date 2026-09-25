@@ -21,11 +21,14 @@ func (r *ring) push(data []byte) {
 	r.bytes += len(data)
 }
 
-// trim drops the oldest entries while the ring holds more than limit bytes,
-// never dropping an entry at or after keep (not yet written to any link).
-func (r *ring) trim(keep int64) {
+// trim drops the oldest written entries while they hold more than limit
+// bytes, never dropping an entry at or after keep (not yet written to any
+// link). unsent is the size of the entries from keep on; the limit applies
+// to written entries alone, so a full backlog cannot squeeze out the replay
+// copies of packets still in flight.
+func (r *ring) trim(keep int64, unsent int) {
 	n := 0
-	for n < len(r.entries) && r.bytes > r.limit && r.first+int64(n) < keep {
+	for n < len(r.entries) && r.bytes-unsent > r.limit && r.first+int64(n) < keep {
 		r.bytes -= len(r.entries[n])
 		r.entries[n] = nil
 		n++
