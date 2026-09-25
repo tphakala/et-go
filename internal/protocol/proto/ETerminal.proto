@@ -1,0 +1,116 @@
+// Copied from Eternal Terminal (https://github.com/MisterTea/EternalTerminal),
+// proto/ETerminal.proto at commit 6f53869473a16407b59f1f3382d291ab97b4f64f.
+// Copyright Jason Gauci and contributors, licensed under the Apache License,
+// Version 2.0. Unmodified apart from this header; see NOTICE.
+
+syntax = "proto2";
+package et;
+option optimize_for = LITE_RUNTIME;
+
+import "ET.proto";
+
+enum TerminalPacketType {
+  KEEP_ALIVE = 0;
+  TERMINAL_BUFFER = 1;
+  TERMINAL_INFO = 2;
+  PORT_FORWARD_DESTINATION_REQUEST = 5;
+  PORT_FORWARD_DESTINATION_RESPONSE = 6;
+  PORT_FORWARD_DATA = 7;
+  TERMINAL_USER_INFO = 8;
+  TERMINAL_INIT = 9;
+  JUMPHOST_INIT = 10;
+  TERMINAL_CLOSE = 11;
+  // Wait status of the remote shell/command, sent once when the session ends.
+  TERMINAL_EXIT_STATUS = 12;
+}
+
+message TerminalBuffer {
+  optional bytes buffer = 1;
+  // When true, buffer is remote stderr (raw pipe / -T sessions only).
+  // Named is_stderr (not stderr): musl #defines stderr as a macro.
+  optional bool is_stderr = 2 [default = false];
+}
+
+// Process status for the remote terminal child (OpenSSH-style exit code).
+message TerminalExitStatus {
+  // Normalized status: WEXITSTATUS when exited, or 128+signal when signaled.
+  optional int32 exitcode = 1;
+}
+
+message TerminalInfo {
+  optional string id = 1;
+  optional int32 row = 2;
+  optional int32 column = 3;
+  optional int32 width = 4;
+  optional int32 height = 5;
+}
+
+message PortForwardSourceRequest {
+  optional SocketEndpoint source = 1;
+  optional SocketEndpoint destination = 2;
+  optional string environmentvariable = 3;
+}
+
+message PortForwardSourceResponse {
+  optional string error = 1;
+}
+
+message PortForwardDestinationRequest {
+  optional SocketEndpoint destination = 1;
+  optional int32 fd = 2;
+}
+
+message PortForwardDestinationResponse {
+  optional int32 clientfd = 1;
+  optional int32 socketid = 2;
+  optional string error = 3;
+}
+
+message PortForwardData {
+  optional bool sourcetodestination = 1;
+  optional int32 socketid = 2;
+  optional bytes buffer = 3;
+  optional string error = 4;
+  optional bool closed = 5;
+  // Source finished writing. Keep the destination open for the reply direction.
+  optional bool half_close = 6;
+}
+
+message InitialPayload {
+  optional bool jumphost = 1 [default = false];
+  repeated PortForwardSourceRequest reversetunnels = 2;
+  map<string, string> environmentvariables = 3;
+  // When true, etterminal runs `command` on pipes instead of a login pty.
+  optional bool no_pty = 4 [default = false];
+  optional string command = 5;
+  // Set by clients that understand TERMINAL_EXIT_STATUS. Older clients leave
+  // this unset, and etserver must not forward that packet to them.
+  optional bool supports_exit_status = 6 [default = false];
+  // ssh -W: keep the session without a pty or a shell.
+  optional bool no_shell = 7 [default = false];
+}
+
+message InitialResponse {
+  optional string error = 1;
+}
+
+message ConfigParams {
+  optional int32 vlevel = 1;
+  optional int32 minloglevel = 2;
+}
+
+message TermInit {
+  repeated string environmentnames = 1;
+  repeated string environmentvalues = 2;
+  optional bool no_pty = 3 [default = false];
+  optional string command = 4;
+  optional bool no_shell = 5 [default = false];
+}
+
+message TerminalUserInfo {
+  optional string id = 1;
+  optional string passkey = 2;
+  optional int64 uid = 3;
+  optional int64 gid = 4;
+  optional int64 fd = 5;
+}

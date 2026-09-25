@@ -33,6 +33,12 @@ jobs:
       - name: Test (race)
         if: matrix.os == 'ubuntu-latest'
         run: go test ./... -race -coverprofile=coverage.out -covermode=atomic
+      # TestWriteMessageLimit is excluded from -race builds (its 128 MiB
+      # messages need over 1 GiB under the race detector), so run it once
+      # without -race here; the Windows leg runs it as part of go test ./....
+      - name: Test (message size limit, no race)
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -run '^TestWriteMessageLimit$' ./internal/wire/
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-latest'
         uses: codecov/codecov-action@v7
@@ -98,3 +104,32 @@ jobs:
           GOOS: windows
         with:
           version: ${{ env.GOLANGCI_LINT_VERSION }}
+  generated:
+    name: Generated code is current
+    runs-on: ubuntu-latest
+    env:
+      # The generated .pb.go headers record the protoc version, so CI must use
+      # the same protoc as developers (3.21.12, the Ubuntu 25.10 package).
+      PROTOC_VERSION: '21.12'
+      PROTOC_SHA256: '3a4c1e5f2516c639d3079b1586e703fc7bcfa2136d58bda24d1d54f949c315e8'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Install protoc
+        run: |
+          curl -sSfL -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
+          sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+          protoc --version
+      - name: Regenerate
+        run: go generate ./internal/protocol
+      - name: Fail on drift
+        run: |
+          out=$(git status --porcelain -- internal/protocol)
+          if [ -n "$out" ]; then
+            echo "$out"
+            git diff -- internal/protocol
+            exit 1
+          fi
