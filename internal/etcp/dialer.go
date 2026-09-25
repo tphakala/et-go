@@ -128,7 +128,10 @@ func (d *Dialer) Dial(ctx context.Context, addr, id, passkey string) (*Conn, err
 		c.cancel(err)
 		return nil, err
 	}
-	c.wg.Go(func() { c.supervise(nc, catchup) })
+	c.wg.Go(func() {
+		defer close(c.readerDone)
+		c.supervise(nc, catchup)
+	})
 	return c, nil
 }
 
@@ -151,17 +154,18 @@ func (d *Dialer) newConn(addr, id, passkey string) *Conn {
 	}
 	ctx, cancel := context.WithCancelCause(context.Background())
 	c := &Conn{
-		netDialer: nd,
-		addr:      addr,
-		id:        id,
-		keepAlive: cmp.Or(d.KeepAlive, defaultKeepAlive),
-		probe:     d.Probe,
-		logger:    logger,
-		ctx:       ctx,
-		cancel:    cancel,
-		inbox:     make(chan protocol.Packet, inboxSize),
-		wake:      make(chan struct{}, 1),
-		space:     make(chan struct{}, 1),
+		netDialer:  nd,
+		addr:       addr,
+		id:         id,
+		keepAlive:  cmp.Or(d.KeepAlive, defaultKeepAlive),
+		probe:      d.Probe,
+		logger:     logger,
+		ctx:        ctx,
+		cancel:     cancel,
+		inbox:      make(chan protocol.Packet, inboxSize),
+		readerDone: make(chan struct{}),
+		wake:       make(chan struct{}, 1),
+		space:      make(chan struct{}, 1),
 	}
 	c.limit = cmp.Or(d.ReplayLimit, defaultReplayLimit)
 	c.ring.limit = c.limit

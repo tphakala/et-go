@@ -50,8 +50,12 @@ type Conn struct {
 	recvSeq int64
 	// pending holds packets already opened and counted in recvSeq whose link
 	// ended before ReadPacket took them; the next link reader hands them
-	// over first. Owned like recvSeq.
-	pending []protocol.Packet
+	// over first. Owned like recvSeq until readerDone closes, then by
+	// ReadPacket under tailMu. Pending packets are always newer than every
+	// packet in inbox: a reader hands nothing on while pending is non-empty.
+	pending    []protocol.Packet
+	readerDone chan struct{} // closed when the supervisor, and so every reader, has exited
+	tailMu     sync.Mutex
 
 	inbox chan protocol.Packet
 	wake  chan struct{} // cap 1: new outbound data for the link writer
@@ -105,7 +109,9 @@ func (c *Conn) WritePacket(ctx context.Context, p protocol.Packet) error {
 // ReadPacket returns the next packet from the server, blocking until one
 // arrives, ctx ends or the Conn fails. Packets are delivered exactly once, in
 // order. Packets that arrived before the Conn failed are still returned
-// first, so a shell's last output is not lost when the session ends.
+// first, so a shell's last output is not lost when the session ends; that
+// includes a packet a dead link was holding for a caller that had stopped
+// reading.
 func (c *Conn) ReadPacket(ctx context.Context) (protocol.Packet, error) {
 	select {
 	case p := <-c.inbox:
@@ -113,12 +119,27 @@ func (c *Conn) ReadPacket(ctx context.Context) (protocol.Packet, error) {
 	case <-ctx.Done():
 		return protocol.Packet{}, context.Cause(ctx)
 	case <-c.ctx.Done():
+		// Wait for the readers to stop, so inbox and pending are final;
+		// then return the inbox, then pending, which is newer.
+		select {
+		case <-c.readerDone:
+		case <-ctx.Done():
+			return protocol.Packet{}, context.Cause(ctx)
+		}
 		select {
 		case p := <-c.inbox:
 			return p, nil
 		default:
-			return protocol.Packet{}, context.Cause(c.ctx)
 		}
+		c.tailMu.Lock()
+		defer c.tailMu.Unlock()
+		if len(c.pending) > 0 {
+			p := c.pending[0]
+			c.pending[0] = protocol.Packet{}
+			c.pending = c.pending[1:]
+			return p, nil
+		}
+		return protocol.Packet{}, context.Cause(c.ctx)
 	}
 }
 

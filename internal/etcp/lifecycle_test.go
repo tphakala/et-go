@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"log/slog"
+	"net"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -61,7 +62,8 @@ func TestBackoffResetsAfterLongLink(t *testing.T) {
 }
 
 // Close returns even while the reader is blocked handing a packet to a
-// caller that has stopped reading.
+// caller that has stopped reading, and ReadPacket still returns every packet
+// that had arrived, the reader's included, before net.ErrClosed.
 func TestCloseWithFullInbox(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		h := newHarness(t, etcp.Dialer{})
@@ -77,6 +79,13 @@ func TestCloseWithFullInbox(t *testing.T) {
 		go func() { done <- h.conn.Close() }()
 		if err := within(t, done); err != nil {
 			t.Fatalf("Close: %v", err)
+		}
+		// The inbox holds packets 0 to 63 and the reader had packet 64.
+		if err := expectNumbered(t.Context(), 65, h.conn.ReadPacket); err != nil {
+			t.Fatalf("after Close: %v", err)
+		}
+		if _, err := readPacket(t, h.conn); !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("ReadPacket after the last packet = %v, want net.ErrClosed", err)
 		}
 	})
 }
@@ -216,6 +225,43 @@ func TestBackpressureBoundary(t *testing.T) {
 		h.net.SetRefuse(false)
 		if err := expectNumbered(t.Context(), 4, h.srv.Recv); err != nil {
 			t.Fatalf("server side: %v", err)
+		}
+	})
+}
+
+// A packet a dead link left pending is still returned when the Conn then
+// ends before another link takes it over: here the session ends during the
+// outage, so the reconnect meets INVALID_KEY. It arrived before the Conn
+// failed, so ReadPacket returns it, after the inbox and before the error.
+func TestPendingPacketSurvivesSessionEnd(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, etcp.Dialer{})
+		defer h.close()
+
+		const n = 100 // more than the inbox holds
+		if err := h.conn.WritePacket(t.Context(), numbered(0, 10)); err != nil {
+			t.Fatalf("WritePacket 0: %v", err)
+		}
+		for i := range n {
+			if err := h.srv.Send(t.Context(), numbered(i, 10)); err != nil {
+				t.Fatalf("Send %d: %v", i, err)
+			}
+		}
+		synctest.Wait() // the inbox is full and the reader holds the next packet
+		h.net.CutAll()
+		h.srv.EndSession()
+		synctest.Wait()
+		if err := h.conn.WritePacket(t.Context(), numbered(1, 10)); err != nil {
+			t.Fatalf("WritePacket 1: %v", err)
+		}
+		synctest.Wait() // the redial met INVALID_KEY and the Conn ended
+
+		// The inbox holds packets 0 to 63 and the reader had packet 64.
+		if err := expectNumbered(t.Context(), 65, h.conn.ReadPacket); err != nil {
+			t.Fatalf("client side: %v", err)
+		}
+		if _, err := readPacket(t, h.conn); !errors.Is(err, etcp.ErrSessionEnded) {
+			t.Fatalf("ReadPacket after the last packet = %v, want ErrSessionEnded", err)
 		}
 	})
 }
