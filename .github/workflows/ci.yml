@@ -120,7 +120,14 @@ jobs:
       # go fix -diff exits non-zero when a modernizer has a suggestion, so code
       # that predates a newer Go idiom fails CI instead of lingering.
       - name: Go modernizers
-        run: go fix -diff ./...
+        run: |
+          go fix -diff ./...
+          GOOS=windows go fix -diff ./...
+          go fix -diff -tags e2e ./test/e2e/
+      # The e2e suite needs a live etserver, so CI never runs it; vet still
+      # type-checks it so a compile break does not go unnoticed.
+      - name: Vet e2e tests
+        run: go vet -tags e2e ./test/e2e/
       # Lint Windows too: platform code is split by build tags and _windows.go
       # suffixes, which a Linux-only lint run never type-checks.
       - name: Run golangci-lint (linux)
