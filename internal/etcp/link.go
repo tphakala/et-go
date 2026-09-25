@@ -48,7 +48,7 @@ func (c *Conn) runLink(nc net.Conn, catchup [][]byte) error {
 
 	l := &link{alive: make(chan struct{}, 1)}
 	var wg sync.WaitGroup
-	wg.Go(func() { cancel(c.readLoop(l, nc, catchup)) })
+	wg.Go(func() { cancel(c.readLoop(ctx, l, nc, catchup)) })
 	wg.Go(func() { cancel(c.writeLoop(ctx, nc)) })
 	wg.Go(func() { cancel(c.watch(ctx, l)) })
 	wg.Wait()
@@ -56,10 +56,19 @@ func (c *Conn) runLink(nc net.Conn, catchup [][]byte) error {
 	return context.Cause(ctx)
 }
 
-// readLoop delivers the peer's catchup first, then frames from the link.
-func (c *Conn) readLoop(l *link, r io.Reader, catchup [][]byte) error {
+// readLoop hands over packets an earlier link left pending, then delivers the
+// peer's catchup, then frames from the link.
+func (c *Conn) readLoop(ctx context.Context, l *link, r io.Reader, catchup [][]byte) error {
+	for len(c.pending) > 0 {
+		if err := c.handOver(ctx, l, c.pending[0]); err != nil {
+			return err // pending stays as it is for the next link
+		}
+		c.pending[0] = protocol.Packet{}
+		c.pending = c.pending[1:]
+	}
+	c.pending = nil
 	for _, b := range catchup {
-		if err := c.deliver(l, b); err != nil {
+		if err := c.deliver(ctx, l, b); err != nil {
 			return err
 		}
 	}
@@ -75,7 +84,7 @@ func (c *Conn) readLoop(l *link, r io.Reader, catchup [][]byte) error {
 		}
 		buf = frame
 		signal(l.alive)
-		if err := c.deliver(l, frame); err != nil {
+		if err := c.deliver(ctx, l, frame); err != nil {
 			return err
 		}
 	}
@@ -87,7 +96,7 @@ func (c *Conn) readLoop(l *link, r io.Reader, catchup [][]byte) error {
 // Open the inbound nonce has advanced, so the stream cannot be resumed;
 // upstream treats a failed decrypt as fatal too
 // (src/base/CryptoHandler.cpp:40-42 at et-v7.0.0).
-func (c *Conn) deliver(l *link, b []byte) error {
+func (c *Conn) deliver(ctx context.Context, l *link, b []byte) error {
 	encrypted, h, payload, err := wire.ParsePacket(b)
 	if err != nil {
 		return c.fail(fmt.Errorf("%w: %w", ErrIntegrity, err))
@@ -100,15 +109,27 @@ func (c *Conn) deliver(l *link, b []byte) error {
 		return c.fail(fmt.Errorf("%w: %w", ErrIntegrity, err))
 	}
 	c.recvSeq++
+	p := protocol.Packet{Header: h, Payload: plain}
+	if err := c.handOver(ctx, l, p); err != nil {
+		// Counted in recvSeq, so the server will not resend it: keep it
+		// for the next link reader rather than drop it.
+		c.pending = append(c.pending, p)
+		return err
+	}
+	return nil
+}
+
+// handOver gives p to ReadPacket, or fails when the link ends first (ctx is
+// the link's context). Waiting on the Conn alone would keep a dead link
+// alive, and with it every write, until the caller read again.
+func (c *Conn) handOver(ctx context.Context, l *link, p protocol.Packet) error {
 	l.delivering.Store(true)
 	defer l.delivering.Store(false)
-	// Wait on the Conn, not the link: the packet is already counted in
-	// recvSeq, so the server will not resend it and it must not be dropped.
 	select {
-	case c.inbox <- protocol.Packet{Header: h, Payload: plain}:
+	case c.inbox <- p:
 		return nil
-	case <-c.ctx.Done():
-		return context.Cause(c.ctx)
+	case <-ctx.Done():
+		return context.Cause(ctx)
 	}
 }
 

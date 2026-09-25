@@ -219,3 +219,50 @@ func TestBackpressureBoundary(t *testing.T) {
 		}
 	})
 }
+
+// A caller that has stopped reading must not stop the Conn from replacing a
+// dead link: the reader, blocked handing a packet to a full inbox, has to
+// let the link go so writes reach the server over the next one. The packet
+// in its hand is already counted as received, so it must still be
+// delivered, once and in order.
+func TestReconnectWhileCallerNotReading(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, etcp.Dialer{})
+		defer h.close()
+
+		const n = 100 // more than the inbox holds
+		if err := h.conn.WritePacket(t.Context(), numbered(0, 10)); err != nil {
+			t.Fatalf("WritePacket 0: %v", err)
+		}
+		for i := range n {
+			if err := h.srv.Send(t.Context(), numbered(i, 10)); err != nil {
+				t.Fatalf("Send %d: %v", i, err)
+			}
+		}
+		synctest.Wait() // the inbox is full and the reader is blocked
+		h.net.CutAll()
+		synctest.Wait()
+		if err := h.conn.WritePacket(t.Context(), numbered(1, 10)); err != nil {
+			t.Fatalf("WritePacket 1: %v", err)
+		}
+		if err := expectNumbered(t.Context(), 2, h.srv.Recv); err != nil {
+			t.Fatalf("server side, caller not reading: %v", err)
+		}
+		// Cut the replacement link too, while its reader is still trying
+		// to hand over the packet the first link left pending.
+		synctest.Wait()
+		h.net.CutAll()
+		synctest.Wait()
+		if err := h.conn.WritePacket(t.Context(), numbered(2, 10)); err != nil {
+			t.Fatalf("WritePacket 2: %v", err)
+		}
+		if p, err := h.srv.Recv(t.Context()); err != nil {
+			t.Fatalf("server side, second cut: %v", err)
+		} else if got, err := number(p); err != nil || got != 2 {
+			t.Fatalf("server side, second cut: got packet %d (%v), want 2", got, err)
+		}
+		if err := expectNumbered(t.Context(), n, h.conn.ReadPacket); err != nil {
+			t.Fatalf("client side: %v", err)
+		}
+	})
+}

@@ -48,6 +48,10 @@ type Conn struct {
 	// recovery, never two at once.
 	in      *seal.Stream
 	recvSeq int64
+	// pending holds packets already opened and counted in recvSeq whose link
+	// ended before ReadPacket took them; the next link reader hands them
+	// over first. Owned like recvSeq.
+	pending []protocol.Packet
 
 	inbox chan protocol.Packet
 	wake  chan struct{} // cap 1: new outbound data for the link writer
