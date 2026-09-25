@@ -1,17 +1,31 @@
 package wire
 
-import "github.com/tphakala/et-go/internal/protocol"
+import (
+	"slices"
+
+	"github.com/tphakala/et-go/internal/protocol"
+)
 
 // AppendPacket appends the serialized packet (encrypted flag byte, header
 // byte, payload) to b. The payload is copied as is: when encrypted is true it
 // must already be the sealed box.
+//
+// payload may share memory with b, including b's spare capacity: the payload
+// is copied before the two prefix bytes are written, so no layout corrupts
+// it. A payload already at b[len(b)+2:], for example one sealed into
+// buf[2:2], is copied onto itself, with no allocation when b has capacity
+// for the packet.
 func AppendPacket(b []byte, encrypted bool, h protocol.Header, payload []byte) []byte {
 	flag := byte(0)
 	if encrypted {
 		flag = 1
 	}
-	b = append(b, flag, byte(h))
-	return append(b, payload...)
+	n := len(b)
+	b = slices.Grow(b, 2+len(payload))[:n+2+len(payload)]
+	copy(b[n+2:], payload)
+	b[n] = flag
+	b[n+1] = byte(h)
+	return b
 }
 
 // ParsePacket splits a serialized packet. The returned payload aliases b.

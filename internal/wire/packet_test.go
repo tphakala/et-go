@@ -30,6 +30,41 @@ func TestAppendPacket(t *testing.T) {
 	}
 }
 
+// TestAppendPacketOverlap pins that a payload sharing memory with b comes
+// out intact wherever it sits, including the two bytes the prefix is written
+// to, and that the in-place layout (payload already at b[len(b)+2:]) reuses
+// b's backing array.
+func TestAppendPacketOverlap(t *testing.T) {
+	const payload = "sealedbox"
+	tests := []struct {
+		name    string
+		offset  int // where the payload starts, relative to len(b) == 0
+		inPlace bool
+	}{
+		{"at b[len(b)]", 0, false},
+		{"at b[len(b)+1]", 1, false},
+		{"at b[len(b)+2], in place", 2, true},
+		{"disjoint, further in", 20, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := make([]byte, 64)
+			p := buf[tt.offset : tt.offset+len(payload)]
+			copy(p, payload)
+
+			got := AppendPacket(buf[:0], true, protocol.HeaderTerminalBuffer, p)
+
+			want := append([]byte{1, byte(protocol.HeaderTerminalBuffer)}, payload...)
+			if !bytes.Equal(got, want) {
+				t.Fatalf("AppendPacket = %q, want %q", got, want)
+			}
+			if tt.inPlace && &got[0] != &buf[0] {
+				t.Error("in-place layout allocated a new array; want buf reused")
+			}
+		})
+	}
+}
+
 func TestParsePacket(t *testing.T) {
 	tests := []struct {
 		name      string
