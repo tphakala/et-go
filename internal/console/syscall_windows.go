@@ -13,6 +13,10 @@ var (
 	procSetConsoleCtrlHandler = modkernel32.NewProc("SetConsoleCtrlHandler")
 )
 
+// writeConsole is WriteConsoleW, a variable so tests can record the chunks
+// Write sends.
+var writeConsole = windows.WriteConsole
+
 // keyEventRecord is KEY_EVENT_RECORD (16 bytes).
 type keyEventRecord struct {
 	KeyDown         int32 // BOOL

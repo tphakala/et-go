@@ -3,9 +3,11 @@ package console
 import (
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -114,8 +116,63 @@ func TestCloseUnblocksRead(t *testing.T) {
 	}
 }
 
+// TestCloseUnblocksLineModeRead covers a Read blocked while the input is in
+// line mode, where ReadConsoleW returns only on a carriage return: after
+// restore ran before Close, or when MakeRaw was never called.
+func TestCloseUnblocksLineModeRead(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		restore bool // call MakeRaw and its restore before reading
+	}{
+		{name: "restored", restore: true},
+		{name: "never_raw", restore: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := openConsole(t)
+			if c.inBase&windows.ENABLE_LINE_INPUT == 0 {
+				t.Skipf("Open-time input mode %#x is not line mode", c.inBase)
+			}
+			if tc.restore {
+				restore, err := c.MakeRaw()
+				if err != nil {
+					t.Fatalf("MakeRaw: %v", err)
+				}
+				if err := restore(); err != nil {
+					t.Fatalf("restore: %v", err)
+				}
+			}
+			readErr := make(chan error, 1)
+			go func() {
+				_, err := c.Read(make([]byte, 16))
+				readErr <- err
+			}()
+			waitReading(t, c)
+
+			if err := c.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			select {
+			case err := <-readErr:
+				if !errors.Is(err, os.ErrClosed) {
+					t.Fatalf("pending Read returned %v, want os.ErrClosed", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("Close did not unblock a Read in line mode")
+			}
+			var left uint32
+			if err := windows.GetNumberOfConsoleInputEvents(c.in, &left); err != nil {
+				t.Fatalf("GetNumberOfConsoleInputEvents: %v", err)
+			}
+			if left != 0 {
+				t.Fatalf("%d input events left after Close, want 0", left)
+			}
+		})
+	}
+}
+
 func TestRestoreReturnsToOpenBaseline(t *testing.T) {
 	c := openConsole(t)
+	t.Cleanup(func() { _ = windows.SetConsoleMode(c.in, c.inBase) })
 	// Model ssh.exe interrupted at a password prompt: echo left off after Open.
 	if err := windows.SetConsoleMode(c.in, c.inBase&^windows.ENABLE_ECHO_INPUT); err != nil {
 		t.Fatalf("degrade input mode: %v", err)
@@ -138,10 +195,41 @@ func TestRestoreReturnsToOpenBaseline(t *testing.T) {
 
 func TestWriteLarge(t *testing.T) {
 	c := openConsole(t)
+	// Record every chunk Write hands to WriteConsoleW, and still write it to
+	// the real console.
+	var chunks [][]uint16
+	orig := writeConsole
+	t.Cleanup(func() { writeConsole = orig })
+	writeConsole = func(h windows.Handle, buf *uint16, n uint32, written *uint32, reserved *byte) error {
+		chunks = append(chunks, slices.Clone(unsafe.Slice(buf, n)))
+		return orig(h, buf, n, written, reserved)
+	}
+
 	// Several times writeUnits, with an emoji straddling the first chunk edge.
 	big := strings.Repeat("x", writeUnits-1) + "😀" + strings.Repeat("y", 3*writeUnits) + "\r\n"
 	if n, err := c.Write([]byte(big)); err != nil || n != len(big) {
 		t.Fatalf("Write(%d bytes) = %d, %v", len(big), n, err)
+	}
+
+	want := utf16.Encode([]rune(big))
+	if len(chunks) == 0 {
+		t.Fatal("Write made no console calls")
+	}
+	if len(chunks[0]) != writeUnits-1 {
+		t.Fatalf("first chunk has %d units, want %d (the pair moved to the next chunk)", len(chunks[0]), writeUnits-1)
+	}
+	var got []uint16
+	for i, ch := range chunks {
+		if len(ch) > writeUnits {
+			t.Fatalf("chunk %d has %d units, want at most %d", i, len(ch), writeUnits)
+		}
+		if len(ch) > 0 && isHighSurrogate(ch[len(ch)-1]) {
+			t.Fatalf("chunk %d ends on a high surrogate", i)
+		}
+		got = append(got, ch...)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("chunks carry %d units, want the %d units of the input in order", len(got), len(want))
 	}
 }
 
@@ -168,9 +256,14 @@ func waitReading(t *testing.T, c *Console) {
 func TestWriteSplitUTF8(t *testing.T) {
 	c := openConsole(t)
 	euro := []byte("€\r\n")
-	for _, part := range [][]byte{euro[:1], euro[1:2], euro[2:]} {
+	// c.buf holds the UTF-16 units the last Write sent to the console.
+	wantUnits := [][]uint16{nil, nil, {0x20AC, '\r', '\n'}}
+	for i, part := range [][]byte{euro[:1], euro[1:2], euro[2:]} {
 		if n, err := c.Write(part); err != nil || n != len(part) {
 			t.Fatalf("Write(%q) = %d, %v", part, n, err)
+		}
+		if !slices.Equal(c.buf, wantUnits[i]) {
+			t.Fatalf("Write %d (%q) sent %#x, want %#x", i+1, part, c.buf, wantUnits[i])
 		}
 	}
 	if c.enc.n != 0 {

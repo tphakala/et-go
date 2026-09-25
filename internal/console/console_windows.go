@@ -105,7 +105,7 @@ func (c *Console) MakeRaw() (restore func() error, err error) {
 	rawOut := c.outBase | windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING |
 		windows.ENABLE_PROCESSED_OUTPUT | windows.ENABLE_WRAP_AT_EOL_OUTPUT
 	if err := windows.SetConsoleMode(c.out, rawOut|windows.DISABLE_NEWLINE_AUTO_RETURN); err != nil {
-		// Older console hosts reject DISABLE_NEWLINE_AUTO_RETURN.
+		// If the host rejects DISABLE_NEWLINE_AUTO_RETURN, run without it.
 		if err := windows.SetConsoleMode(c.out, rawOut); err != nil {
 			_ = windows.SetConsoleMode(c.in, c.inBase)
 			return nil, fmt.Errorf("console: set output mode: %w", err)
@@ -182,7 +182,7 @@ func (c *Console) Write(p []byte) (int, error) {
 	for units := c.buf; len(units) > 0; {
 		chunk := units[:chunkLen(units, writeUnits)]
 		var n uint32
-		if err := windows.WriteConsole(c.out, &chunk[0], uint32(len(chunk)), &n, nil); err != nil {
+		if err := writeConsole(c.out, &chunk[0], uint32(len(chunk)), &n, nil); err != nil {
 			return 0, fmt.Errorf("console: write: %w", err)
 		}
 		if n == 0 {
@@ -236,15 +236,27 @@ func (c *Console) Resizes(ctx context.Context) iter.Seq[Size] {
 // Close restores the console mode if MakeRaw was called and unblocks a
 // pending Read, which then returns os.ErrClosed. The handles are the
 // process's standard handles and stay open. Close is idempotent: later
-// calls return nil at once.
+// calls return nil at once. A second Close that runs while the first is
+// still in progress also returns nil at once, possibly before the first
+// has flushed the input and restored the mode.
 //
-// A blocked ReadConsoleW is woken by injecting a key-down input record; the
-// reader sees the closing flag and discards what it read. The record is
-// re-injected every 100 ms until the reader returns (or 1 s passes),
-// because the reader may be between setting its in-flight flag and entering
-// ReadConsoleW when the first record arrives. The input buffer is flushed
-// only after that, so no wake record or unread typeahead reaches the parent
-// shell.
+// A blocked ReadConsoleW is woken by injecting an Enter key-down record;
+// the reader sees the closing flag and discards what it read. Enter is
+// used because in line mode ReadConsole "returns only when a carriage
+// return character is read" (Microsoft docs, SetConsoleMode,
+// ENABLE_LINE_INPUT), which a Read meets after restore ran before Close or
+// when MakeRaw was never called. MEASURED on win11-qa under ConPTY (ssh
+// -tt), 2026-09-25: the record wakes a Read in raw mode and in line mode,
+// and no input events remain after Close; a space record left a line-mode
+// Read blocked. In line mode with echo on, the console echoes the carriage
+// return as a line break on screen.
+//
+// The record is re-injected every 100 ms until the reader returns (or 1 s
+// passes) because the console's single input buffer can be shared by any
+// number of processes (Microsoft docs, Consoles), so another process
+// attached to the console may consume a record before this reader does.
+// The input buffer is flushed only after that, so no wake record or unread
+// typeahead reaches the parent shell.
 func (c *Console) Close() error {
 	c.mu.Lock()
 	if c.closing {
@@ -289,15 +301,19 @@ func (c *Console) wakeAndWait() error {
 	}
 }
 
-// wakeReader injects a space key-down so a pending ReadConsoleW returns.
+// wakeReader injects an Enter key-down so a pending ReadConsoleW returns. A
+// carriage return completes the read in raw mode and in line mode alike.
 func (c *Console) wakeReader() error {
 	rec := inputRecord{
 		EventType: windows.KEY_EVENT,
 		Event: keyEventRecord{
 			KeyDown:        1,
 			RepeatCount:    1,
-			VirtualKeyCode: 0x20, // VK_SPACE
-			UnicodeChar:    ' ',
+			VirtualKeyCode: 0x0D, // VK_RETURN
+			// MapVirtualKeyW(VK_RETURN, MAPVK_VK_TO_VSC) (MEASURED on
+			// win11-qa, 2026-09-25).
+			VirtualScanCode: 0x1C,
+			UnicodeChar:     '\r',
 		},
 	}
 	if err := writeConsoleInput(c.in, []inputRecord{rec}); err != nil {
@@ -337,7 +353,7 @@ func ctrlHandler(ctrlType uint32) uintptr {
 		return 0
 	}
 	f := breakFunc.Load()
-	if f == nil || *f == nil {
+	if f == nil {
 		return 0
 	}
 	(*f)()
