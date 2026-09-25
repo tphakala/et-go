@@ -42,6 +42,7 @@ func TestHeaderString(t *testing.T) {
 		{HeaderTerminalInfo, "TerminalInfo"},
 		{HeaderTerminalClose, "TerminalClose"},
 		{HeaderTerminalExitStatus, "TerminalExitStatus"},
+		{HeaderInitialResponse, "InitialResponse"},
 		{HeaderInitialPayload, "InitialPayload"},
 		{Header(99), "Header(99)"},
 	}

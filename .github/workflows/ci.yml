@@ -33,6 +33,12 @@ jobs:
       - name: Test (race)
         if: matrix.os == 'ubuntu-latest'
         run: go test ./... -race -coverprofile=coverage.out -covermode=atomic
+      # TestWriteMessageLimit is excluded from -race builds (its 128 MiB
+      # messages need over 1 GiB under the race detector), so run it once
+      # without -race here; the Windows leg runs it as part of go test ./....
+      - name: Test (message size limit, no race)
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -run '^TestWriteMessageLimit$' ./internal/wire/
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-latest'
         uses: codecov/codecov-action@v7

@@ -39,9 +39,9 @@ var ErrOpen = errors.New("seal: message authentication failed")
 // counter with the original and sealing through both never reuses a nonce.
 // The key sits behind a second pointer: fmt prints a Stream held in an
 // unexported field by reflection, without calling Format, and for a verb
-// that is invalid on a pointer (%s, %q) it dereferences that pointer once,
-// which then shows only the key pointer's address. The zero value is not
-// usable; get a Stream from New.
+// that is invalid on a pointer (%s, %q, %t and others) it dereferences the
+// state once, which shows the key only as an address and the nonce, which is
+// public, as bytes. The zero value is not usable; get a Stream from New.
 type Stream struct {
 	st *state
 }
@@ -106,8 +106,8 @@ func (st *state) increment() {
 
 // Format implements fmt.Formatter so every verb prints a fixed, redacted
 // form instead of the state, because the binding rule forbids the session
-// passkey ever appearing in fmt output. The direction byte is safe to show;
-// the nonce counter and the key never are. The receiver is a value so that
+// passkey ever appearing in fmt output. The direction byte is shown; the
+// nonce counter is not, and the key never is. The receiver is a value so that
 // both fmt.Sprint(s) and fmt.Sprint(*s) reach this method; the zero value
 // prints seal.Stream{}.
 func (s Stream) Format(f fmt.State, _ rune) {
@@ -122,7 +122,9 @@ func (s Stream) Format(f fmt.State, _ rune) {
 // LogValue implements slog.LogValuer for the same reason Format exists: a
 // handler that does not go through fmt (the JSON handler, for one) must not
 // see the key either. The value receiver keeps both slog.Any("s", s) and
-// slog.Any("s", *s) redacted, matching Format.
+// slog.Any("s", *s) redacted, matching Format. A value receiver cannot
+// guard a nil *Stream: slog of one logs the recovered nil-dereference panic,
+// never key bytes.
 func (s Stream) LogValue() slog.Value {
 	if s.st == nil {
 		return slog.GroupValue()

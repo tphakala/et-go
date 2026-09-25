@@ -12,12 +12,14 @@ import (
 
 // TestWriteMessageLimit pins WriteMessage's bound from both sides: a body of
 // exactly MaxMessageSize is written, one byte more is refused with
-// ErrTooLarge and nothing reaches the writer. It builds messages of about
-// 128 MiB, so it is skipped in -short mode and excluded from -race builds,
-// where the race detector's shadow memory pushes it past 1 GiB.
+// ErrTooLarge and nothing reaches the writer. Each case holds a few hundred
+// MiB (the fixture, the marshaled body and the framed buffer), so it is
+// skipped in -short mode and excluded from -race builds, where the race
+// detector's shadow memory pushes it past 1 GiB. CI runs it in the Windows
+// leg and in a dedicated non-race step on Ubuntu.
 func TestWriteMessageLimit(t *testing.T) {
 	if testing.Short() {
-		t.Skip("allocates about 128 MiB per case")
+		t.Skip("allocates a few hundred MiB per case")
 	}
 	// A CatchupBuffer with one entry encodes as tag 0x0a, a 4-byte varint
 	// length, then the entry: 5 bytes of overhead at this size.

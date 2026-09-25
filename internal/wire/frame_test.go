@@ -90,9 +90,9 @@ func TestFrameSizeBoundary(t *testing.T) {
 }
 
 // TestWriteFrameWriterError checks that a failing io.Writer's error reaches
-// the caller through errors.Is, and that WriteFrame issues exactly one
-// Write call: it builds the length prefix and body in one buffer first,
-// matching the contract etcp relies on.
+// the caller through errors.Is. The single-Write contract is pinned by
+// TestWriteFrameSingleWrite: a writer that fails on its first call cannot
+// tell one Write from two.
 func TestWriteFrameWriterError(t *testing.T) {
 	w := &errWriter{err: errWriterSentinel}
 	err := WriteFrame(w, []byte("hello"))

@@ -11,10 +11,13 @@ import (
 // must already be the sealed box.
 //
 // payload may share memory with b, including b's spare capacity: the payload
-// is copied before the two prefix bytes are written, so no layout corrupts
-// it. A payload already at b[len(b)+2:], for example one sealed into
-// buf[2:2], is copied onto itself, with no allocation when b has capacity
-// for the packet.
+// is copied before the two prefix bytes are written, so the returned packet
+// always holds the original payload bytes. When payload lies in
+// b[len(b):len(b)+2+len(payload)] anywhere other than exactly at
+// b[len(b)+2:], the caller's payload slice is overwritten and must not be
+// used afterwards. A payload already at b[len(b)+2:], for example one sealed
+// into buf[2:2], is copied onto itself, with no allocation when b has
+// capacity for the packet.
 func AppendPacket(b []byte, encrypted bool, h protocol.Header, payload []byte) []byte {
 	flag := byte(0)
 	if encrypted {

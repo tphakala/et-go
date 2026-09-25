@@ -133,9 +133,9 @@ func TestReadMessageSizeBoundary(t *testing.T) {
 }
 
 // TestWriteMessageWriterError checks that a failing io.Writer's error
-// reaches the caller through errors.Is, and that WriteMessage issues
-// exactly one Write call: it builds the length prefix and the marshaled
-// body in one buffer first, matching the contract etcp relies on.
+// reaches the caller through errors.Is. The single-Write contract is pinned
+// by TestWriteMessageSingleWrite: a writer that fails on its first call
+// cannot tell one Write from two.
 func TestWriteMessageWriterError(t *testing.T) {
 	sh := &protocol.SequenceHeader{}
 	sh.SetSequenceNumber(1)
