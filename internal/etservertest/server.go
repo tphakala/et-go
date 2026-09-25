@@ -233,7 +233,11 @@ func (s *Server) accept(b []byte) error {
 	s.recvSeq++
 	s.queue = append(s.queue, protocol.Packet{Header: h, Payload: plain})
 	signal(s.notify)
-	// Upstream echoes KEEP_ALIVE (src/terminal/TerminalServer.cpp:389-393).
+	// Upstream echoes KEEP_ALIVE (src/terminal/TerminalServer.cpp:389-393), but
+	// only once the session runs: a first packet other than INITIAL_PAYLOAD
+	// aborts etserver (TerminalServer.cpp:429-439). This fake echoes at any
+	// time and does not model that abort; etcp's TestNoProbeBeforeFirstPacket
+	// pins the client side instead.
 	if h == protocol.HeaderKeepAlive && s.echo {
 		s.enqueueLocked(protocol.Packet{Header: protocol.HeaderKeepAlive})
 		signal(s.wake)

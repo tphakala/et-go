@@ -1,6 +1,7 @@
 package etcp_test
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"testing/synctest"
@@ -11,18 +12,54 @@ import (
 	"github.com/tphakala/et-go/internal/wire"
 )
 
-func TestLivenessKeepsHealthyLink(t *testing.T) {
+// etserver 7.0.0 aborts the whole server when a session's first packet is not
+// INITIAL_PAYLOAD (src/terminal/TerminalServer.cpp:429-439 at et-v7.0.0), so
+// no probe may go out before the caller's first packet, however long the link
+// stays quiet, and that quiet is not taken for a dead link.
+func TestNoProbeBeforeFirstPacket(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		h := newHarness(t, etcp.Dialer{})
 		defer h.close()
 
 		synctest.Sleep(time.Minute)
 		if got := h.net.Dials(); got != 1 {
+			t.Fatalf("Dials() = %d after a quiet minute before any write, want 1", got)
+		}
+		if err := h.conn.WritePacket(t.Context(), numbered(0, 10)); err != nil {
+			t.Fatalf("WritePacket: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		p, err := h.srv.Recv(ctx)
+		if err != nil {
+			t.Fatalf("Recv: %v", err)
+		}
+		if n, err := number(p); p.Header != protocol.HeaderTerminalBuffer || err != nil || n != 0 {
+			t.Fatalf("first packet the server got = header %v %q, want the caller's packet 0", p.Header, p.Payload)
+		}
+	})
+}
+
+func TestLivenessKeepsHealthyLink(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, etcp.Dialer{})
+		defer h.close()
+		if err := h.conn.WritePacket(t.Context(), numbered(0, 10)); err != nil {
+			t.Fatalf("WritePacket: %v", err)
+		}
+
+		synctest.Sleep(time.Minute)
+		if got := h.net.Dials(); got != 1 {
 			t.Fatalf("Dials() = %d after a quiet minute with echoes, want 1", got)
 		}
-		p, err := h.srv.Recv(t.Context())
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		if err := expectNumbered(ctx, 1, h.srv.Recv); err != nil {
+			t.Fatalf("server side: %v", err)
+		}
+		p, err := h.srv.Recv(ctx)
 		if err != nil || p.Header != protocol.HeaderKeepAlive {
-			t.Fatalf("server got %v, %v; want a KEEP_ALIVE probe", p.Header, err)
+			t.Fatalf("server got %v, %v; want a KEEP_ALIVE probe after the packet", p.Header, err)
 		}
 	})
 }
@@ -32,6 +69,9 @@ func TestLivenessDetectsDeadLink(t *testing.T) {
 		h := newHarness(t, etcp.Dialer{})
 		defer h.close()
 		h.srv.EchoKeepAlive(false)
+		if err := h.conn.WritePacket(t.Context(), numbered(0, 10)); err != nil {
+			t.Fatalf("WritePacket: %v", err)
+		}
 
 		// Probe at 5 s, dead at 10 s, immediate redial.
 		synctest.Sleep(9 * time.Second)

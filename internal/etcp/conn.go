@@ -119,6 +119,13 @@ func (c *Conn) Close() error {
 	return nil
 }
 
+// sealedNone reports whether no packet has been sealed yet, probes included.
+func (c *Conn) sealedNone() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ring.next() == 0
+}
+
 // enqueue queues p regardless of the backlog limit; used for liveness probes.
 func (c *Conn) enqueue(p protocol.Packet) {
 	c.mu.Lock()

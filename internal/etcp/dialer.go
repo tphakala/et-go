@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	defaultKeepAlive   = 5 * time.Second // upstream's maximum (src/base/Headers.hpp:179)
+	defaultKeepAlive   = 5 * time.Second // upstream's maximum (src/base/Headers.hpp:180 at et-v7.0.0)
 	defaultReplayLimit = 64 << 20        // upstream MAX_BACKUP_BYTES (src/base/BackedWriter.hpp:32)
 	dialTimeout        = 10 * time.Second
 )
@@ -44,10 +44,15 @@ type Dialer struct {
 		DialContext(ctx context.Context, network, address string) (net.Conn, error)
 	}
 	// KeepAlive is the quiet period after which a probe is sent; after two quiet
-	// periods the link is declared dead. Zero means 5 s (upstream's maximum).
+	// periods the link is declared dead. Zero means 5 s (upstream's maximum,
+	// src/base/Headers.hpp:180 at et-v7.0.0). Probing starts only after the
+	// first WritePacket, because etserver aborts when a session's first packet
+	// is not INITIAL_PAYLOAD (src/terminal/TerminalServer.cpp:429-439); before
+	// that, a dead link is detected only by TCP keepalive.
 	KeepAlive time.Duration
 	// Probe is the packet sent as a liveness probe. The zero value sends header 0
-	// with no payload, which is KEEP_ALIVE and is echoed by etserver.
+	// with no payload, which is KEEP_ALIVE, echoed by etserver once the session
+	// runs (src/terminal/TerminalServer.cpp:389-393 at et-v7.0.0).
 	Probe protocol.Packet
 	// ReplayLimit bounds the sealed bytes kept for replay. Zero means 64 MiB.
 	// Packets count as sent once written to the socket, and written packets

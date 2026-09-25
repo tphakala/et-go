@@ -161,7 +161,8 @@ func (c *Conn) writeLoop(ctx context.Context, w io.Writer) error {
 
 // watch declares the link dead after two quiet keepAlive periods, sending the
 // probe after the first. Time the reader spends blocked on a slow ReadPacket
-// caller does not count as silence.
+// caller does not count as silence, and neither does the time before the
+// caller's first packet, when no probe may be sent.
 func (c *Conn) watch(ctx context.Context, l *link) error {
 	t := time.NewTimer(c.keepAlive)
 	defer t.Stop()
@@ -175,6 +176,12 @@ func (c *Conn) watch(ctx context.Context, l *link) error {
 		case <-t.C:
 			switch {
 			case l.delivering.Load():
+				probed = false
+			case c.sealedNone():
+				// No probe before the caller's first packet: etserver 7.0.0
+				// aborts when a session's first packet is not INITIAL_PAYLOAD
+				// (src/terminal/TerminalServer.cpp:429-439 at et-v7.0.0).
+				// Until then a dead link is left to TCP keepalive.
 				probed = false
 			case probed:
 				return errLinkDead
