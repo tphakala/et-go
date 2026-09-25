@@ -446,6 +446,18 @@ func TestExitCodeDetached(t *testing.T) {
 	}
 }
 
+// A remote exit status is passed through when it fits a process status and
+// becomes 255 otherwise, so 256 cannot wrap to a successful 0.
+func TestExitCodeRemoteStatusRange(t *testing.T) {
+	for _, tt := range []struct{ code, want int }{
+		{0, 0}, {7, 7}, {255, 255}, {256, 255}, {512, 255}, {-1, 255},
+	} {
+		if got := exitCode(&session.ExitError{Code: tt.code}, io.Discard); got != tt.want {
+			t.Errorf("exitCode(ExitError{%d}) = %d, want %d", tt.code, got, tt.want)
+		}
+	}
+}
+
 // cmd/et passes *etcp.Conn straight to session, which ends normally only on a
 // ReadPacket error wrapping io.EOF. This pins the etcp side of that contract;
 // the compile-time assertion in run.go pins the method set.

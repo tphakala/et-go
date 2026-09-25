@@ -163,6 +163,7 @@ type fakeTerminal struct {
 	closed  chan struct{}
 	closeMu sync.Once
 	size    console.Size
+	sizeErr error  // when set, Size fails with it
 	rest    []byte // unread tail of the current key chunk (reader goroutine only)
 
 	mu  sync.Mutex
@@ -211,7 +212,12 @@ func (f *fakeTerminal) Close() error {
 	return nil
 }
 
-func (f *fakeTerminal) Size() (console.Size, error) { return f.size, nil }
+func (f *fakeTerminal) Size() (console.Size, error) {
+	if f.sizeErr != nil {
+		return console.Size{}, f.sizeErr
+	}
+	return f.size, nil
+}
 
 func (f *fakeTerminal) Resizes(ctx context.Context) iter.Seq[console.Size] {
 	return func(yield func(console.Size) bool) {

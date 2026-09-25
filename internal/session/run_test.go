@@ -101,6 +101,23 @@ func TestRunSkipsUnknownAndKeepAlive(t *testing.T) {
 	})
 }
 
+// A terminal whose size cannot be read still gets a first TERMINAL_INFO, of
+// the default 80x24, rather than none until the first resize.
+func TestRunSizeErrorSendsDefault(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		tr := newFakeTransport()
+		term := newFakeTerminal(size80x24)
+		term.sizeErr = errors.New("no size")
+		done := runAsync(t.Context(), tr, Options{Terminal: term})
+		synctest.Wait()
+		close(tr.in)
+		<-done
+		if got := tr.sentSizes(t); len(got) != 1 || got[0] != size80x24 {
+			t.Fatalf("sent sizes %v, want [%v]", got, size80x24)
+		}
+	})
+}
+
 func TestRunSendsInitialSizeAndResizes(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		tr := newFakeTransport()
@@ -119,9 +136,8 @@ func TestRunSendsInitialSizeAndResizes(t *testing.T) {
 	})
 }
 
-// A pty whose size was never set reports 0x0, and a 0x0 TERMINAL_INFO breaks
-// full-screen programs on the remote side, so zero cell dimensions are sent
-// as 80x24 while the pixel dimensions pass through as reported.
+// A pty whose size was never set reports 0x0, so zero cell dimensions are
+// sent as 80x24 while the pixel dimensions pass through as reported.
 func TestRunZeroSizeSentAs80x24(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		tr := newFakeTransport()

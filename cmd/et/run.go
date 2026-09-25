@@ -187,6 +187,11 @@ func exitCode(err error, stderr io.Writer) int {
 		return 0
 	}
 	if ee, ok := errors.AsType[*session.ExitError](err); ok {
+		// A process status is 8 bits on Unix, so an out-of-range code would
+		// wrap (256 would exit 0, a failure reported as success).
+		if ee.Code < 0 || ee.Code > 255 {
+			return 255
+		}
 		return ee.Code
 	}
 	if errors.Is(err, session.ErrDetached) {

@@ -73,7 +73,11 @@ func (s *terminalService) start(ctx context.Context, t Transport, in iter.Seq[pr
 	if sz, err := s.term.Size(); err == nil {
 		s.size.set(sz) // the sender sends this first TERMINAL_INFO
 	} else {
+		// Still send a first TERMINAL_INFO: the zero size goes out as
+		// defaultSize, so the remote pty gets a size without waiting for a
+		// resize.
 		s.log.Debug("session: read terminal size", "err", err)
+		s.size.set(console.Size{})
 	}
 	g.Go(func() error { return s.output(ctx, in) })
 	g.goIn(&s.reader, func() error { return s.read(ctx) })
