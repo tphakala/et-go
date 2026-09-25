@@ -9,7 +9,7 @@ const (
 	passkeyLen = 32
 
 	// regeneratePrefix makes etterminal discard the id and passkey it is sent
-	// and generate fresh ones (upstream src/terminal/TerminalMain.cpp:114-120).
+	// and generate fresh ones (upstream src/terminal/TerminalMain.cpp:114-120 at et-v7.0.0).
 	regeneratePrefix = "XXX"
 )
 

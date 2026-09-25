@@ -267,6 +267,11 @@ func TestRunFailures(t *testing.T) {
 					t.Errorf("error %q mentions %q, which does not apply", err, s)
 				}
 			}
+			// "status 1" alone would also match "status 127"; exit1 prints no
+			// output and gets no hint, so its status ends the message.
+			if tt.mode == "exit1" && !strings.HasSuffix(err.Error(), "status 1") {
+				t.Errorf("error %q does not end with the exit status", err)
+			}
 			// The marker ends in ':', so printing it bare before ": ssh exited"
 			// would render a confusing "IDPASSKEY::".
 			if strings.Contains(err.Error(), "::") {

@@ -6,7 +6,7 @@ import (
 )
 
 // marker precedes the credentials in etterminal's output
-// (upstream src/terminal/TerminalMain.cpp:185).
+// (upstream src/terminal/TerminalMain.cpp:185 at et-v7.0.0).
 const marker = "IDPASSKEY:"
 
 // parseCredentials finds the first IDPASSKEY marker in out and returns the

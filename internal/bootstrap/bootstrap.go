@@ -28,7 +28,9 @@ const (
 	maxOutput = 1 << 20
 	// excerptLen caps the output excerpt quoted in an error.
 	excerptLen = 512
-	// waitDelay is how long Run waits after cancelling ssh before killing it.
+	// waitDelay is how long Run waits after cancelling ssh before killing it,
+	// and how long it waits for ssh's stdout to close after ssh exits; the
+	// exec.ErrWaitDelay branch in Run depends on the latter.
 	waitDelay = 2 * time.Second
 )
 
