@@ -112,6 +112,58 @@ func TestReadMessageTruncated(t *testing.T) {
 	}
 }
 
+// TestReadMessageSizeBoundary checks that a header declaring exactly
+// MaxMessageSize, with no body following, reads as far as it can and
+// returns io.ErrUnexpectedEOF, not ErrTooLarge: the length itself is
+// within bounds. This pins the limit check at "greater than," not "greater
+// than or equal": sabotaging ReadMessage's check to >= would reject this
+// length outright and return ErrTooLarge instead.
+func TestReadMessageSizeBoundary(t *testing.T) {
+	var hdr [8]byte
+	binary.LittleEndian.PutUint64(hdr[:], uint64(MaxMessageSize))
+	var sh protocol.SequenceHeader
+	err := ReadMessage(bytes.NewReader(hdr[:]), &sh)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("ReadMessage(length=MaxMessageSize, no body) = %v, want io.ErrUnexpectedEOF", err)
+	}
+}
+
+// TestWriteMessageWriterError checks that a failing io.Writer's error
+// reaches the caller through errors.Is, and that WriteMessage issues
+// exactly one Write call: it builds the length prefix and the marshaled
+// body in one buffer first, matching the contract etcp relies on.
+func TestWriteMessageWriterError(t *testing.T) {
+	sh := &protocol.SequenceHeader{}
+	sh.SetSequenceNumber(1)
+
+	w := &errWriter{err: errWriterSentinel}
+	err := WriteMessage(w, sh)
+	if !errors.Is(err, errWriterSentinel) {
+		t.Fatalf("WriteMessage = %v, want wrapping %v", err, errWriterSentinel)
+	}
+	if w.calls != 1 {
+		t.Fatalf("Write called %d times, want 1", w.calls)
+	}
+}
+
+// TestWriteMessageSingleWrite pins the single-Write contract on the success
+// path: WriteMessage must build the length prefix and marshaled body in one
+// buffer before writing, not write the header and body separately. etcp
+// relies on this to keep a message from interleaving with another
+// goroutine's write on the same connection.
+func TestWriteMessageSingleWrite(t *testing.T) {
+	sh := &protocol.SequenceHeader{}
+	sh.SetSequenceNumber(1)
+
+	w := &countingWriter{}
+	if err := WriteMessage(w, sh); err != nil {
+		t.Fatalf("WriteMessage: %v", err)
+	}
+	if w.calls != 1 {
+		t.Fatalf("Write called %d times, want 1", w.calls)
+	}
+}
+
 func TestReadMessageGarbage(t *testing.T) {
 	// Length 2, then bytes that are not a valid protobuf (field 0 is illegal).
 	in := []byte{2, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x00}

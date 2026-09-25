@@ -122,6 +122,53 @@ func TestGolden(t *testing.T) {
 	}
 }
 
+// TestGoldenOpen exercises the Open path against boxes a real libsodium ran
+// produced, which is the path the client runs in production for
+// ServerToClient: boxes arrive from etserver, not from this package's own
+// Seal. A fresh Stream per direction Opens every recorded golden box in
+// sequence. The positions between recorded rows are filled by sealing
+// locally with a second Stream, so the opener's nonce advances once per
+// operation and lines up with the golden file's index column exactly as it
+// would in a real, unbroken session.
+func TestGoldenOpen(t *testing.T) {
+	rows := readGolden(t)
+	for _, dir := range []Direction{ClientToServer, ServerToClient} {
+		t.Run(fmt.Sprintf("dir%d", dir), func(t *testing.T) {
+			want := map[int]goldenRow{}
+			for _, r := range rows {
+				if r.dir == dir {
+					want[r.index] = r
+				}
+			}
+			opener := New(&testKey, dir)
+			sealer := New(&testKey, dir)
+			checked := 0
+			for i := 1; i <= 257; i++ {
+				plaintext := fmt.Appendf(nil, "packet %d", i)
+				// Always seal locally so sealer's nonce advances in lockstep
+				// with opener's, one increment per loop iteration, whether or
+				// not this position's box is used.
+				local := sealer.Seal(nil, plaintext)
+				box := local
+				if r, ok := want[i]; ok {
+					box = r.box
+					checked++
+				}
+				got, err := opener.Open(nil, box)
+				if err != nil {
+					t.Fatalf("Open %d: %v", i, err)
+				}
+				if !bytes.Equal(got, plaintext) {
+					t.Fatalf("Open %d = %q, want %q", i, got, plaintext)
+				}
+			}
+			if checked != len(want) {
+				t.Errorf("checked %d golden rows, golden has %d", checked, len(want))
+			}
+		})
+	}
+}
+
 func TestRoundTrip(t *testing.T) {
 	sealer := New(&testKey, ServerToClient)
 	opener := New(&testKey, ServerToClient)

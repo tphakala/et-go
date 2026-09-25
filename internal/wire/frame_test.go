@@ -69,6 +69,56 @@ func TestReadFrameLimit(t *testing.T) {
 	}
 }
 
+// TestFrameSizeBoundary checks that a frame of exactly MaxFrameSize is
+// accepted and round-trips, pinning the limit checks at "greater than," not
+// "greater than or equal": sabotaging either WriteFrame's or ReadFrame's
+// check to >= rejects this frame as too large.
+func TestFrameSizeBoundary(t *testing.T) {
+	frame := bytes.Repeat([]byte{0xab}, MaxFrameSize)
+
+	var buf bytes.Buffer
+	if err := WriteFrame(&buf, frame); err != nil {
+		t.Fatalf("WriteFrame(MaxFrameSize bytes): %v", err)
+	}
+	got, err := ReadFrame(&buf, nil)
+	if err != nil {
+		t.Fatalf("ReadFrame(MaxFrameSize bytes): %v", err)
+	}
+	if !bytes.Equal(got, frame) {
+		t.Fatalf("ReadFrame returned %d bytes, want %d", len(got), len(frame))
+	}
+}
+
+// TestWriteFrameWriterError checks that a failing io.Writer's error reaches
+// the caller through errors.Is, and that WriteFrame issues exactly one
+// Write call: it builds the length prefix and body in one buffer first,
+// matching the contract etcp relies on.
+func TestWriteFrameWriterError(t *testing.T) {
+	w := &errWriter{err: errWriterSentinel}
+	err := WriteFrame(w, []byte("hello"))
+	if !errors.Is(err, errWriterSentinel) {
+		t.Fatalf("WriteFrame = %v, want wrapping %v", err, errWriterSentinel)
+	}
+	if w.calls != 1 {
+		t.Fatalf("Write called %d times, want 1", w.calls)
+	}
+}
+
+// TestWriteFrameSingleWrite pins the single-Write contract on the success
+// path: WriteFrame must build the length prefix and body in one buffer
+// before writing, not write the header and body separately. etcp relies on
+// this to keep a frame from interleaving with another goroutine's write on
+// the same connection.
+func TestWriteFrameSingleWrite(t *testing.T) {
+	w := &countingWriter{}
+	if err := WriteFrame(w, []byte("hello")); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+	if w.calls != 1 {
+		t.Fatalf("Write called %d times, want 1", w.calls)
+	}
+}
+
 func TestWriteFrameLimit(t *testing.T) {
 	var buf bytes.Buffer
 	err := WriteFrame(&buf, make([]byte, MaxFrameSize+1))
