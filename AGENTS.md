@@ -13,16 +13,17 @@ Module path: `github.com/tphakala/et-go`. Go version: see `go.mod`.
 
 ## Layout
 
-| Path                    | Role                                                                                                                                                                                  |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cmd/et`                | Entry point and flag parsing.                                                                                                                                                         |
-| `internal/bootstrap`    | Runs the system ssh to start etterminal; validates the config, parses the IDPASSKEY credentials it prints and redacts the passkey.                                                    |
-| `internal/etcp`         | Reliable, ordered, encrypted packet connection over replaceable TCP links: replay ring, recover exchange, liveness probes, reconnect backoff, write backpressure.                     |
-| `internal/etservertest` | Test-only fake etserver (written independently from upstream semantics) and an in-memory `net.Pipe` network with cut and refuse controls, for synctest-driven etcp tests.             |
-| `internal/protocol`     | Wire messages generated from upstream's `.proto` files (opaque API), plus `Header`, `Version` and `Packet`. Regenerate with `go generate ./internal/protocol` (needs protoc 3.21.12). |
-| `internal/seal`         | One direction of the libsodium-compatible encrypted stream: secretbox with a counter nonce.                                                                                           |
-| `internal/wire`         | Handshake message framing, stream frame framing, packet layout and size limits.                                                                                                       |
-| `rules/`                | ruleguard matchers used by golangci-lint (build tag `ruleguard`).                                                                                                                     |
+| Path                    | Role                                                                                                                                                                                                                 |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cmd/et`                | Entry point and flag parsing.                                                                                                                                                                                        |
+| `internal/bootstrap`    | Runs the system ssh to start etterminal; validates the config, parses the IDPASSKEY credentials it prints and redacts the passkey.                                                                                   |
+| `internal/console`      | Local console in raw mode per platform: raw VT input as UTF-8, output, window size and resize events, and a Close that unblocks a pending Read. Windows uses UTF-16 carry codecs shared with every platform's tests. |
+| `internal/etcp`         | Reliable, ordered, encrypted packet connection over replaceable TCP links: replay ring, recover exchange, liveness probes, reconnect backoff, write backpressure.                                                    |
+| `internal/etservertest` | Test-only fake etserver (written independently from upstream semantics) and an in-memory `net.Pipe` network with cut and refuse controls, for synctest-driven etcp tests.                                            |
+| `internal/protocol`     | Wire messages generated from upstream's `.proto` files (opaque API), plus `Header`, `Version` and `Packet`. Regenerate with `go generate ./internal/protocol` (needs protoc 3.21.12).                                |
+| `internal/seal`         | One direction of the libsodium-compatible encrypted stream: secretbox with a counter nonce.                                                                                                                          |
+| `internal/wire`         | Handshake message framing, stream frame framing, packet layout and size limits.                                                                                                                                      |
+| `rules/`                | ruleguard matchers used by golangci-lint (build tag `ruleguard`).                                                                                                                                                    |
 
 Update this table when a package is added.
 
