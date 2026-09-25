@@ -117,6 +117,10 @@ jobs:
       # Compile them explicitly so a broken rule fails CI instead of going unnoticed.
       - name: Ruleguard rules compile
         run: go build -tags ruleguard ./rules/
+      # go fix -diff exits non-zero when a modernizer has a suggestion, so code
+      # that predates a newer Go idiom fails CI instead of lingering.
+      - name: Go modernizers
+        run: go fix -diff ./...
       # Lint Windows too: platform code is split by build tags and _windows.go
       # suffixes, which a Linux-only lint run never type-checks.
       - name: Run golangci-lint (linux)
