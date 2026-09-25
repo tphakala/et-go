@@ -83,8 +83,9 @@ func TestReadAfterCloseIgnoresPending(t *testing.T) {
 // Close returns an error, which these tests do not inspect unless they say
 // so.
 
-// consoleFreeWait bounds waits in console-free tests.
-const consoleFreeWait = 5 * time.Second
+// waitTimeout bounds how long a test waits for a call or goroutine that
+// must finish, with or without a console.
+const waitTimeout = 5 * time.Second
 
 // stillRunning is how long a console-free test watches a call that must
 // stay blocked. When the code under test is broken such a call makes only
@@ -104,7 +105,7 @@ func recv(t *testing.T, ch <-chan error, what string) error {
 	select {
 	case err := <-ch:
 		return err
-	case <-time.After(consoleFreeWait):
+	case <-time.After(waitTimeout):
 		t.Fatalf("%s never returned", what)
 		return nil
 	}
@@ -148,7 +149,7 @@ func TestConcurrentCloseWaits(t *testing.T) {
 	first := closeAsync(c)
 	select {
 	case <-entered:
-	case <-time.After(consoleFreeWait):
+	case <-time.After(waitTimeout):
 		t.Fatal("the first Close never tried to wake the reader")
 	}
 	second := closeAsync(c)
@@ -259,7 +260,7 @@ func TestCloseWaitsForInFlightWrite(t *testing.T) {
 	}()
 	select {
 	case <-entered:
-	case <-time.After(consoleFreeWait):
+	case <-time.After(waitTimeout):
 		t.Fatal("Write never reached the console")
 	}
 
@@ -323,7 +324,7 @@ func TestResizesEndsAfterClose(t *testing.T) {
 	done := rangeResizes(t, c, t.Context())
 	select {
 	case <-done:
-	case <-time.After(consoleFreeWait):
+	case <-time.After(waitTimeout):
 		t.Fatal("the range over Resizes did not end after Close")
 	}
 }
@@ -344,7 +345,7 @@ func TestResizesKeepsPollingOnOtherErrors(t *testing.T) {
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(consoleFreeWait):
+	case <-time.After(waitTimeout):
 		t.Fatal("the range over Resizes did not end after ctx was cancelled")
 	}
 }
@@ -392,7 +393,7 @@ func TestCloseUnblocksRead(t *testing.T) {
 		if !errors.Is(err, os.ErrClosed) {
 			t.Fatalf("pending Read returned %v, want os.ErrClosed", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(waitTimeout):
 		t.Fatal("Close did not unblock a pending Read")
 	}
 
@@ -499,7 +500,7 @@ func TestCloseUnblocksLineModeRead(t *testing.T) {
 				if !errors.Is(err, os.ErrClosed) {
 					t.Fatalf("pending Read returned %v, want os.ErrClosed", err)
 				}
-			case <-time.After(5 * time.Second):
+			case <-time.After(waitTimeout):
 				t.Fatal("Close did not unblock a Read in line mode")
 			}
 			var left uint32
@@ -513,9 +514,20 @@ func TestCloseUnblocksLineModeRead(t *testing.T) {
 	}
 }
 
+// resetInputAtEnd sets c's input back to its Open baseline when the test
+// ends, reporting a failure.
+func resetInputAtEnd(t *testing.T, c *Console) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := windows.SetConsoleMode(c.in, c.inBase); err != nil {
+			t.Errorf("reset input mode to %#x: %v", c.inBase, err)
+		}
+	})
+}
+
 func TestRestoreReturnsToOpenBaseline(t *testing.T) {
 	c := openConsole(t)
-	t.Cleanup(func() { _ = windows.SetConsoleMode(c.in, c.inBase) })
+	resetInputAtEnd(t, c)
 	// Model ssh.exe interrupted at a password prompt: echo left off after Open.
 	if err := windows.SetConsoleMode(c.in, c.inBase&^windows.ENABLE_ECHO_INPUT); err != nil {
 		t.Fatalf("degrade input mode: %v", err)
@@ -541,16 +553,21 @@ func TestRestoreReturnsToOpenBaseline(t *testing.T) {
 
 // fakeModes makes c's restore read the given modes, in call order, and
 // records the modes it sets. It needs no console.
-func fakeModes(c *Console, reported ...uint32) *[]uint32 {
+func fakeModes(t *testing.T, c *Console, setErr error, reported ...uint32) *[]uint32 {
+	t.Helper()
 	var set []uint32
 	c.getModeFn = func(_ windows.Handle, mode *uint32) error {
+		if len(reported) == 0 {
+			t.Errorf("restore read more console modes than the script reports")
+			return errors.New("script exhausted")
+		}
 		*mode = reported[0]
 		reported = reported[1:]
 		return nil
 	}
 	c.setModeFn = func(_ windows.Handle, mode uint32) error {
 		set = append(set, mode)
-		return nil
+		return setErr
 	}
 	return &set
 }
@@ -571,13 +588,28 @@ func TestRestoreSkipsUnchangedMode(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newConsole(0, 0)
 			c.inBase, c.outBase = inBase, outBase
-			set := fakeModes(c, tc.reported...)
+			set := fakeModes(t, c, nil, tc.reported...)
 			_ = c.Close() // the flush on a zero handle fails; not inspected
 			if !slices.Equal(*set, tc.want) {
 				t.Fatalf("Close set modes %#x, want %#x", *set, tc.want)
 			}
 		})
 	}
+
+	// A failed set reaches Close's caller.
+	t.Run("set_fails", func(t *testing.T) {
+		c := newConsole(0, 0)
+		c.inBase, c.outBase = inBase, outBase
+		errSet := errors.New("set console mode failed")
+		set := fakeModes(t, c, errSet, 0x3f0, outBase)
+		err := c.Close()
+		if len(*set) != 1 {
+			t.Fatalf("Close made %d set calls, want 1", len(*set))
+		}
+		if !errors.Is(err, errSet) {
+			t.Fatalf("Close = %v, want an error wrapping the failed set", err)
+		}
+	})
 }
 
 // TestRestoreSerializedWithClose needs no console: a Close that starts
@@ -611,7 +643,7 @@ func TestRestoreSerializedWithClose(t *testing.T) {
 	go func() { restored <- c.restore() }()
 	select {
 	case <-entered:
-	case <-time.After(consoleFreeWait):
+	case <-time.After(waitTimeout):
 		t.Fatal("restore never set a mode")
 	}
 	closed := closeAsync(c)
@@ -635,7 +667,7 @@ func echoOff(t *testing.T, c *Console) uint32 {
 	if c.inBase&windows.ENABLE_ECHO_INPUT == 0 {
 		t.Skipf("Open-time input mode %#x has echo off already", c.inBase)
 	}
-	t.Cleanup(func() { _ = windows.SetConsoleMode(c.in, c.inBase) })
+	resetInputAtEnd(t, c)
 	degraded := c.inBase &^ windows.ENABLE_ECHO_INPUT
 	if err := windows.SetConsoleMode(c.in, degraded); err != nil {
 		t.Fatalf("degrade input mode: %v", err)
@@ -760,7 +792,7 @@ func waitReading(t *testing.T, c *Console) {
 	t.Helper()
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(waitTimeout)
 	for {
 		c.mu.Lock()
 		reading := c.reading

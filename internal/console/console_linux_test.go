@@ -430,6 +430,57 @@ func TestRestoreSkipsUnchangedMode(t *testing.T) {
 	}
 }
 
+// TestCloseReportsRestoreError checks that a failed restore reaches the
+// caller of the first Close, and that a later Close returns nil.
+func TestCloseReportsRestoreError(t *testing.T) {
+	_, slave := openPTY(t)
+	c := mustConsole(t, slave)
+	withEchoOff(t, slave) // so Close has a mode to set
+	errSet := errors.New("set terminal state failed")
+	c.setState = func(int, *term.State) error { return errSet }
+
+	if err := c.Close(); !errors.Is(err, errSet) {
+		t.Fatalf("Close = %v, want an error wrapping the failed restore", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("second Close = %v, want nil", err)
+	}
+}
+
+// TestSizeConcurrentWithClose runs Size in a loop while Close runs, many
+// times over: every error Size returns must wrap os.ErrClosed. Size reads
+// the terminal under the lock Close holds, so it never sees a descriptor
+// that is being closed.
+func TestSizeConcurrentWithClose(t *testing.T) {
+	for i := range 50 {
+		_, slave := openPTY(t)
+		c := mustConsole(t, slave)
+		started := make(chan struct{})
+		sizeErr := make(chan error, 1)
+		go func() {
+			close(started)
+			for {
+				if _, err := c.Size(); err != nil {
+					sizeErr <- err
+					return
+				}
+			}
+		}()
+		<-started
+		if err := c.Close(); err != nil {
+			t.Fatalf("round %d: Close = %v, want nil", i, err)
+		}
+		select {
+		case err := <-sizeErr:
+			if !errors.Is(err, os.ErrClosed) {
+				t.Fatalf("round %d: Size racing Close = %v, want an error wrapping os.ErrClosed", i, err)
+			}
+		case <-time.After(waitTimeout):
+			t.Fatalf("round %d: Size kept succeeding after Close", i)
+		}
+	}
+}
+
 // TestRestoreConcurrentWithClose runs a restore func and Close at the same
 // time, many times over so the two land in both orders: restore must run
 // under the lock Close holds, so it either restores before Close or sees
