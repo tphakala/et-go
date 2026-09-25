@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -81,6 +82,27 @@ func runFakeSSH(mode string, args []string) int {
 	case "exit1":
 		// A remote failure with some other status and no output.
 		return 1
+	case "linger":
+		// ssh exits 0 without credentials while a descendant still holds its
+		// stdout, so Run's WaitDelay has to close the pipe.
+		hold := exec.Command(os.Args[0])
+		hold.Env = append(os.Environ(), fakeSSHModeEnv+"=hold", fakeSSHArgvEnv+"=")
+		hold.Stdout = os.Stdout
+		if err := hold.Start(); err != nil {
+			return 96
+		}
+		return 0
+	case "hold":
+		// Keeps writing to the inherited stdout and exits on the first failed
+		// write, which comes as soon as the reader closes the pipe; the loop
+		// bound stops it even if nobody does.
+		for range 50 {
+			if _, err := os.Stdout.WriteString("."); err != nil {
+				return 0
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		return 0
 	case "hang":
 		time.Sleep(time.Hour)
 		return 0
@@ -211,6 +233,7 @@ func TestRunFailures(t *testing.T) {
 		{"noise", []string{"status 0", `"Welcome to the server"`}, []string{missingHint, sshHint}},
 		{"malformed", []string{"malformed id", "status 0"}, []string{missingHint, sshHint}},
 		{"exit1", []string{"status 1"}, []string{missingHint, sshHint, "; output:"}},
+		{"linger", []string{"status 0"}, []string{missingHint, sshHint}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.mode, func(t *testing.T) {

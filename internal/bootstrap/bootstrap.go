@@ -100,7 +100,9 @@ func Run(ctx context.Context, cfg Config) (Credentials, error) {
 		return Credentials{}, fmt.Errorf("bootstrap: ssh interrupted: %w", context.Cause(ctx))
 	}
 	exitErr, isExit := errors.AsType[*exec.ExitError](runErr)
-	if runErr != nil && !isExit {
+	// ErrWaitDelay means ssh exited 0 but a descendant kept its stdout open
+	// past waitDelay: a finished run without credentials, not a start failure.
+	if runErr != nil && !isExit && !errors.Is(runErr, exec.ErrWaitDelay) {
 		return Credentials{}, fmt.Errorf("bootstrap: run %s: %w", sshPath, runErr)
 	}
 	return Credentials{}, describeFailure(exitErr, parseErr, out.Bytes())
