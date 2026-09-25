@@ -159,7 +159,8 @@ type netDialer interface {
 
 // connect dials one TCP link and runs the connect handshake on it (plus the
 // recover exchange for a returning client). It returns the ready connection
-// and the peer's catchup entries, which the new link delivers first.
+// and the peer's catchup entries, which the new link delivers first. If ctx
+// ends during the handshake, the error wraps context.Cause(ctx).
 func (c *Conn) connect(ctx context.Context, first bool) (net.Conn, [][]byte, error) {
 	dctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
@@ -170,11 +171,21 @@ func (c *Conn) connect(ctx context.Context, first bool) (net.Conn, [][]byte, err
 	stop := context.AfterFunc(ctx, func() { _ = nc.Close() })
 	defer stop()
 	catchup, err := c.handshake(idleConn{Conn: nc, timeout: handshakeIdle}, first)
+	if err == nil && !stop() {
+		// ctx ended as the handshake finished and the AfterFunc has
+		// closed nc: the link is unusable.
+		err = context.Cause(ctx)
+	}
 	if err == nil {
 		err = nc.SetDeadline(time.Time{})
 	}
 	if err != nil {
 		_ = nc.Close()
+		if ctx.Err() != nil {
+			// Ending ctx closes nc, so the handshake reports a closed
+			// connection; the cause is what the caller needs.
+			return nil, nil, fmt.Errorf("etcp: connect: %w", context.Cause(ctx))
+		}
 		return nil, nil, err
 	}
 	return nc, catchup, nil

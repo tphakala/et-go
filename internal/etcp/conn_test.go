@@ -115,6 +115,30 @@ func TestDialRejectsBadOptions(t *testing.T) {
 	}
 }
 
+// When the caller's context ends during the handshake, Dial reports the
+// context's cause, not the closed-connection error that ending it produced.
+func TestDialContextCauseMidHandshake(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := &scripted{handle: func(_ int, c *rawServer) {
+			var req protocol.ConnectRequest
+			if wire.ReadMessage(c.br, &req) == nil {
+				c.drain() // never answer
+			}
+		}}
+		d := etcp.Dialer{NetDialer: s}
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+		conn, err := d.Dial(ctx, testAddr, testID, testKey)
+		if err == nil {
+			_ = conn.Close()
+		}
+		s.wg.Wait()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Dial = %v, want an error wrapping context.DeadlineExceeded", err)
+		}
+	})
+}
+
 func TestDialRejectsShortPasskey(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := &scripted{handle: func(_ int, c *rawServer) {
