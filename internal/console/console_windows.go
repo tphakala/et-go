@@ -54,10 +54,11 @@ type Console struct {
 	exited chan struct{} // receives once when a reader returns after Close
 	done   chan struct{} // closed when the first Close has finished
 
-	// injectFn appends input records (WriteConsoleInputW) and writeFn
-	// writes UTF-16 units (WriteConsoleW). nil means the real call; tests
-	// set fakes to run without a console.
+	// injectFn appends input records (WriteConsoleInputW), readFn reads
+	// UTF-16 units (ReadConsoleW) and writeFn writes them (WriteConsoleW).
+	// nil means the real call; tests set fakes to run without a console.
 	injectFn func(h windows.Handle, recs []inputRecord) error
+	readFn   func(h windows.Handle, buf *uint16, toread uint32, read *uint32, inputControl *byte) error
 	writeFn  func(h windows.Handle, buf *uint16, n uint32, written *uint32, reserved *byte) error
 
 	// getModeFn and setModeFn read and set a console mode when restoring
@@ -200,8 +201,19 @@ func (c *Console) setModeIfChanged(h windows.Handle, mode uint32) error {
 
 // Read reads raw VT input as UTF-8. Once Close has run, Read returns
 // os.ErrClosed, including a Read that was blocked and any bytes still
-// buffered from an earlier console read.
+// buffered from an earlier console read. A console read that returns no
+// units is retried.
+//
+// Ctrl+Break does not end a pending read. MEASURED on win11-qa under
+// ConPTY (ssh -tt), 2026-09-25: with a handler that consumes
+// CTRL_BREAK_EVENT (as OnBreak installs), GenerateConsoleCtrlEvent
+// (CTRL_BREAK_EVENT, 0) ran the handler and left ReadConsoleW pending in
+// raw and in line mode, so Read needs no handling for it.
 func (c *Console) Read(p []byte) (int, error) {
+	read := c.readFn
+	if read == nil {
+		read = windows.ReadConsole
+	}
 	for {
 		c.mu.Lock()
 		if c.closing {
@@ -216,7 +228,7 @@ func (c *Console) Read(p []byte) (int, error) {
 		c.mu.Unlock()
 
 		var n uint32
-		err := windows.ReadConsole(c.in, &c.units[0], uint32(len(c.units)), &n, nil)
+		err := read(c.in, &c.units[0], uint32(len(c.units)), &n, nil)
 
 		c.mu.Lock()
 		c.reading = false
@@ -242,6 +254,10 @@ func (c *Console) Read(p []byte) (int, error) {
 // Write writes remote output, at most writeUnits UTF-16 units per console
 // call and never splitting a surrogate pair between calls. An incomplete
 // UTF-8 sequence at the end of p is held until the next Write completes it.
+// When the console reports a partial write, Write continues from the first
+// unit not written, so a pair can be split between calls only if the
+// console itself reports writing half of it. Whether any console host does
+// that is unmeasured; Write does not back off to a pair boundary.
 //
 // On a console error Write reports 0 bytes written even if earlier chunks
 // reached the screen: the UTF-16 units are not mapped back to input bytes.
@@ -265,7 +281,7 @@ func (c *Console) Write(p []byte) (int, error) {
 	}
 	write := c.writeFn
 	if write == nil {
-		write = writeConsole
+		write = windows.WriteConsole
 	}
 	c.buf = c.enc.append(c.buf[:0], p)
 	for units := c.buf; len(units) > 0; {
@@ -276,6 +292,9 @@ func (c *Console) Write(p []byte) (int, error) {
 		}
 		if n == 0 {
 			return 0, io.ErrShortWrite
+		}
+		if int(n) > len(chunk) {
+			return 0, fmt.Errorf("console: write: console reported %d units written of %d", n, len(chunk))
 		}
 		units = units[n:]
 	}

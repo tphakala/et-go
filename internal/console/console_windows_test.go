@@ -2,6 +2,7 @@ package console
 
 import (
 	"errors"
+	"io"
 	"os"
 	"slices"
 	"strings"
@@ -23,6 +24,26 @@ func TestInputRecordLayout(t *testing.T) {
 	}
 	if got := unsafe.Offsetof(inputRecord{}.Event); got != 4 {
 		t.Fatalf("offsetof(INPUT_RECORD.Event) = %d, want 4", got)
+	}
+	// KEY_EVENT_RECORD member offsets and sizes (Microsoft docs,
+	// KEY_EVENT_RECORD: BOOL, WORD, WORD, WORD, union uChar, DWORD).
+	var k keyEventRecord
+	for _, f := range []struct {
+		name              string
+		off, size         uintptr
+		wantOff, wantSize uintptr
+	}{
+		{"bKeyDown", unsafe.Offsetof(k.KeyDown), unsafe.Sizeof(k.KeyDown), 0, 4},
+		{"wRepeatCount", unsafe.Offsetof(k.RepeatCount), unsafe.Sizeof(k.RepeatCount), 4, 2},
+		{"wVirtualKeyCode", unsafe.Offsetof(k.VirtualKeyCode), unsafe.Sizeof(k.VirtualKeyCode), 6, 2},
+		{"wVirtualScanCode", unsafe.Offsetof(k.VirtualScanCode), unsafe.Sizeof(k.VirtualScanCode), 8, 2},
+		{"uChar", unsafe.Offsetof(k.UnicodeChar), unsafe.Sizeof(k.UnicodeChar), 10, 2},
+		{"dwControlKeyState", unsafe.Offsetof(k.ControlKeyState), unsafe.Sizeof(k.ControlKeyState), 12, 4},
+	} {
+		if f.off != f.wantOff || f.size != f.wantSize {
+			t.Errorf("KEY_EVENT_RECORD.%s at offset %d, size %d; want offset %d, size %d",
+				f.name, f.off, f.size, f.wantOff, f.wantSize)
+		}
 	}
 }
 
@@ -237,7 +258,9 @@ func TestCloseWaitsForInFlightWrite(t *testing.T) {
 }
 
 // openConsole returns the real console, or skips when the test binary has
-// none (for example when its output is piped).
+// none (for example when its output is piped). The console is closed when
+// the test ends, which returns it to the Open baseline for the next test;
+// a Close the test made itself leaves that one returning nil.
 func openConsole(t *testing.T) *Console {
 	t.Helper()
 	c, err := Open()
@@ -247,6 +270,11 @@ func openConsole(t *testing.T) *Console {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	t.Cleanup(func() {
+		if err := c.Close(); err != nil {
+			t.Errorf("Close at test end: %v", err)
+		}
+	})
 	return c
 }
 
@@ -276,13 +304,67 @@ func TestCloseUnblocksRead(t *testing.T) {
 		t.Fatal("Close did not unblock a pending Read")
 	}
 
-	start := time.Now()
-	if err := c.Close(); err != nil {
+	if err := recv(t, closeAsync(c), "second Close"); err != nil {
 		t.Fatalf("second Close: %v, want nil", err)
 	}
-	if d := time.Since(start); d > 100*time.Millisecond {
-		t.Fatalf("second Close took %v, want an immediate return", d)
+}
+
+// TestCloseFlushesTypeahead checks that input nobody read is discarded by
+// Close, so it does not reach the shell et returns to.
+func TestCloseFlushesTypeahead(t *testing.T) {
+	c := openConsole(t)
+	key := inputRecord{
+		EventType: windows.KEY_EVENT,
+		Event:     keyEventRecord{KeyDown: 1, RepeatCount: 1, VirtualKeyCode: 'A', UnicodeChar: 'a'},
 	}
+	if err := writeConsoleInput(c.in, []inputRecord{key, key}); err != nil {
+		t.Fatalf("inject typeahead: %v", err)
+	}
+	if n := inputEvents(t, c); n == 0 {
+		t.Fatal("injected typeahead is not in the input buffer")
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if n := inputEvents(t, c); n != 0 {
+		t.Fatalf("%d input events left after Close, want 0", n)
+	}
+}
+
+func inputEvents(t *testing.T, c *Console) uint32 {
+	t.Helper()
+	var n uint32
+	if err := windows.GetNumberOfConsoleInputEvents(c.in, &n); err != nil {
+		t.Fatalf("GetNumberOfConsoleInputEvents: %v", err)
+	}
+	return n
+}
+
+// TestCloseRestoresOutputMode checks that Close returns the output handle,
+// not only the input handle, to its Open baseline.
+func TestCloseRestoresOutputMode(t *testing.T) {
+	c := openConsole(t)
+	if _, err := c.MakeRaw(); err != nil {
+		t.Fatalf("MakeRaw: %v", err)
+	}
+	if mode := outputMode(t, c); mode == c.outBase {
+		t.Skipf("MakeRaw left the output mode at the baseline %#x", mode)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if mode := outputMode(t, c); mode != c.outBase {
+		t.Fatalf("output mode after Close = %#x, want the Open baseline %#x", mode, c.outBase)
+	}
+}
+
+func outputMode(t *testing.T, c *Console) uint32 {
+	t.Helper()
+	var mode uint32
+	if err := windows.GetConsoleMode(c.out, &mode); err != nil {
+		t.Fatalf("GetConsoleMode(out): %v", err)
+	}
+	return mode
 }
 
 // TestCloseUnblocksLineModeRead covers a Read blocked while the input is in
@@ -359,6 +441,9 @@ func TestRestoreReturnsToOpenBaseline(t *testing.T) {
 	}
 	if mode != c.inBase {
 		t.Fatalf("input mode after restore = %#x, want the Open baseline %#x", mode, c.inBase)
+	}
+	if mode := outputMode(t, c); mode != c.outBase {
+		t.Fatalf("output mode after restore = %#x, want the Open baseline %#x", mode, c.outBase)
 	}
 }
 
@@ -509,17 +594,46 @@ func TestRestoreAfterClose(t *testing.T) {
 	}
 }
 
-func TestWriteLarge(t *testing.T) {
-	c := openConsole(t)
-	// Record every chunk Write hands to WriteConsoleW, and still write it to
-	// the real console.
+// writeStep is one scripted WriteConsoleW result: the units it reports
+// written (all of the chunk when all is set) or an error.
+type writeStep struct {
+	n   uint32
+	all bool
+	err error
+}
+
+// scriptWrite sets c.writeFn to a fake that records every chunk and answers
+// with steps in order. It fails the test if Write calls it more often than
+// the script allows.
+func scriptWrite(t *testing.T, c *Console, steps ...writeStep) *[][]uint16 {
+	t.Helper()
 	var chunks [][]uint16
-	orig := writeConsole
-	t.Cleanup(func() { writeConsole = orig })
-	writeConsole = func(h windows.Handle, buf *uint16, n uint32, written *uint32, reserved *byte) error {
+	c.writeFn = func(_ windows.Handle, buf *uint16, n uint32, written *uint32, _ *byte) error {
 		chunks = append(chunks, slices.Clone(unsafe.Slice(buf, n)))
-		return orig(h, buf, n, written, reserved)
+		if len(steps) == 0 {
+			t.Errorf("Write made console call %d, beyond its script", len(chunks))
+			return errors.New("script exhausted")
+		}
+		s := steps[0]
+		steps = steps[1:]
+		*written = s.n
+		if s.all {
+			*written = n
+		}
+		return s.err
 	}
+	return &chunks
+}
+
+// fullWrites answers every console call by reporting the whole chunk
+// written, for up to n calls.
+func fullWrites(n int) []writeStep {
+	return slices.Repeat([]writeStep{{all: true}}, n)
+}
+
+func TestWriteLarge(t *testing.T) {
+	c := newConsole(0, 0)
+	chunksp := scriptWrite(t, c, fullWrites(8)...)
 
 	// Several times writeUnits, with an emoji straddling the first chunk edge.
 	big := strings.Repeat("x", writeUnits-1) + "😀" + strings.Repeat("y", 3*writeUnits) + "\r\n"
@@ -528,6 +642,7 @@ func TestWriteLarge(t *testing.T) {
 	}
 
 	want := utf16.Encode([]rune(big))
+	chunks := *chunksp
 	if len(chunks) == 0 {
 		t.Fatal("Write made no console calls")
 	}
@@ -570,20 +685,150 @@ func waitReading(t *testing.T, c *Console) {
 }
 
 func TestWriteSplitUTF8(t *testing.T) {
-	c := openConsole(t)
+	c := newConsole(0, 0)
+	chunks := scriptWrite(t, c, fullWrites(1)...)
 	euro := []byte("€\r\n")
-	// c.buf holds the UTF-16 units the last Write sent to the console.
-	wantUnits := [][]uint16{nil, nil, {0x20AC, '\r', '\n'}}
+	// The first two parts hold an incomplete sequence and reach no console
+	// call; the third completes it.
+	wantCalls := []int{0, 0, 1}
 	for i, part := range [][]byte{euro[:1], euro[1:2], euro[2:]} {
 		if n, err := c.Write(part); err != nil || n != len(part) {
 			t.Fatalf("Write(%q) = %d, %v", part, n, err)
 		}
-		if !slices.Equal(c.buf, wantUnits[i]) {
-			t.Fatalf("Write %d (%q) sent %#x, want %#x", i+1, part, c.buf, wantUnits[i])
+		if len(*chunks) != wantCalls[i] {
+			t.Fatalf("after Write %d (%q) the console had %d calls, want %d", i+1, part, len(*chunks), wantCalls[i])
 		}
 	}
-	if c.enc.n != 0 {
-		t.Fatalf("encoder still carries %d bytes after a complete sequence", c.enc.n)
+	if want := []uint16{0x20AC, '\r', '\n'}; !slices.Equal((*chunks)[0], want) {
+		t.Fatalf("console got %#x, want %#x", (*chunks)[0], want)
+	}
+}
+
+// TestWriteConsoleResults covers how Write reacts to what WriteConsoleW
+// reports: all written, a partial write, nothing written, an error, and an
+// impossible count larger than the chunk.
+func TestWriteConsoleResults(t *testing.T) {
+	errConsole := errors.New("console failed")
+	twoChunks := strings.Repeat("z", writeUnits+10) // one full chunk and 10 units
+	for _, tc := range []struct {
+		name      string
+		p         string
+		steps     []writeStep
+		wantN     int
+		wantErr   error // matched with errors.Is; nil means no error
+		anyErr    bool  // an error is wanted but no sentinel names it
+		wantCalls []int // units handed to each console call
+	}{
+		{name: "full", p: "hello", steps: fullWrites(1), wantN: 5, wantCalls: []int{5}},
+		{name: "partial", p: "hello", steps: []writeStep{{n: 2}, {all: true}}, wantN: 5, wantCalls: []int{5, 3}},
+		{name: "nothing_written", p: "hello", steps: []writeStep{{n: 0}}, wantErr: io.ErrShortWrite, wantCalls: []int{5}},
+		{name: "error", p: "hello", steps: []writeStep{{err: errConsole}}, wantErr: errConsole, wantCalls: []int{5}},
+		{
+			name: "count_beyond_chunk", p: twoChunks,
+			steps:  []writeStep{{n: writeUnits + 1}, {all: true}},
+			anyErr: true, wantCalls: []int{writeUnits},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newConsole(0, 0)
+			chunks := scriptWrite(t, c, tc.steps...)
+			n, err := c.Write([]byte(tc.p))
+			switch {
+			case tc.wantErr != nil:
+				if n != 0 || !errors.Is(err, tc.wantErr) {
+					t.Fatalf("Write = %d, %v; want 0, %v", n, err, tc.wantErr)
+				}
+			case tc.anyErr:
+				if n != 0 || err == nil {
+					t.Fatalf("Write = %d, %v; want 0 and an error", n, err)
+				}
+			default:
+				if n != tc.wantN || err != nil {
+					t.Fatalf("Write = %d, %v; want %d, nil", n, err, tc.wantN)
+				}
+			}
+			calls := make([]int, 0, len(*chunks))
+			for _, ch := range *chunks {
+				calls = append(calls, len(ch))
+			}
+			if !slices.Equal(calls, tc.wantCalls) {
+				t.Fatalf("console calls carried %v units, want %v", calls, tc.wantCalls)
+			}
+		})
+	}
+}
+
+// scriptRead sets c.readFn to a fake that returns each element of reads
+// from one ReadConsoleW call, in order. It fails the test if Read calls it
+// more often than the script allows.
+func scriptRead(t *testing.T, c *Console, reads ...[]uint16) {
+	t.Helper()
+	calls := 0
+	c.readFn = func(_ windows.Handle, buf *uint16, toread uint32, read *uint32, _ *byte) error {
+		calls++
+		if len(reads) == 0 {
+			t.Errorf("Read made console read %d, beyond its script", calls)
+			return errors.New("script exhausted")
+		}
+		*read = uint32(copy(unsafe.Slice(buf, toread), reads[0]))
+		reads = reads[1:]
+		return nil
+	}
+}
+
+func readString(t *testing.T, c *Console, size int) string {
+	t.Helper()
+	p := make([]byte, size)
+	n, err := c.Read(p)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	return string(p[:n])
+}
+
+// TestReadJoinsSplitSurrogatePair needs no console: a pair whose halves
+// arrive from two console reads decodes to one UTF-8 sequence.
+func TestReadJoinsSplitSurrogatePair(t *testing.T) {
+	c := newConsole(0, 0)
+	pair := utf16.Encode([]rune("😀"))
+	scriptRead(t, c, pair[:1], pair[1:])
+	if got := readString(t, c, 16); got != "😀" {
+		t.Fatalf("Read = %q, want %q", got, "😀")
+	}
+}
+
+// TestReadPassesEscapeSequences needs no console: terminal replies such as
+// a device attributes reply and a cursor position report reach the reader
+// byte for byte.
+func TestReadPassesEscapeSequences(t *testing.T) {
+	c := newConsole(0, 0)
+	const replies = "\x1b[?1;2c\x1b[12;40R"
+	scriptRead(t, c, utf16.Encode([]rune(replies)))
+	if got := readString(t, c, 64); got != replies {
+		t.Fatalf("Read = %q, want %q", got, replies)
+	}
+}
+
+// TestReadSmallBufferKeepsRest needs no console: bytes that do not fit p
+// are returned by the next Read without another console read.
+func TestReadSmallBufferKeepsRest(t *testing.T) {
+	c := newConsole(0, 0)
+	scriptRead(t, c, utf16.Encode([]rune("abcdef")))
+	if got := readString(t, c, 3); got != "abc" {
+		t.Fatalf("first Read = %q, want %q", got, "abc")
+	}
+	if got := readString(t, c, 16); got != "def" {
+		t.Fatalf("second Read = %q, want %q", got, "def")
+	}
+}
+
+// TestReadRetriesEmptyRead needs no console: a console read that returns no
+// units does not end Read with zero bytes; Read reads again.
+func TestReadRetriesEmptyRead(t *testing.T) {
+	c := newConsole(0, 0)
+	scriptRead(t, c, nil, utf16.Encode([]rune("x")))
+	if got := readString(t, c, 16); got != "x" {
+		t.Fatalf("Read = %q, want %q", got, "x")
 	}
 }
 
