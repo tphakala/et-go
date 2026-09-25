@@ -50,8 +50,12 @@ type Options struct {
 	Logger *slog.Logger
 }
 
-// ExitError reports the remote shell's exit status, when the server sent one
-// (etserver 7.0.0 never does; upstream master does).
+// ExitError reports the remote shell's exit status, when the server sent one.
+// Upstream master forwards TERMINAL_EXIT_STATUS only to a client that set
+// supports_exit_status (src/terminal/TerminalServer.cpp:594-595 at upstream
+// master b834d6ebb; lines 278-279 do the same on the jumphost path). The
+// et-v7.0.0 proto/ETerminal.proto has no such field and no
+// TERMINAL_EXIT_STATUS header, so a 7.0.0 server never sends one.
 type ExitError struct{ Code int }
 
 func (e *ExitError) Error() string {
@@ -81,8 +85,11 @@ var errEnded = errors.New("session: ended by server")
 // Call it before switching the console to raw mode, so an error prints normally.
 func Start(ctx context.Context, t Transport, opts Options) error {
 	payload := &protocol.InitialPayload{}
-	// v7.0.0 skips this unknown field; upstream master then sends
-	// TERMINAL_EXIT_STATUS before closing (spec section 3).
+	// Upstream master sends TERMINAL_EXIT_STATUS only when this is set
+	// (src/terminal/TerminalServer.cpp:594-595 at b834d6ebb). et-v7.0.0's
+	// proto/ETerminal.proto has no supports_exit_status field, so a 7.0.0
+	// server skips it as an unknown field and never sends the status (see
+	// internal/protocol/protocol.go on commit 6f53869).
 	payload.SetSupportsExitStatus(true)
 	b, err := proto.Marshal(payload)
 	if err != nil {
