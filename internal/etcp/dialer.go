@@ -19,8 +19,12 @@ import (
 )
 
 const (
-	defaultKeepAlive   = 5 * time.Second // upstream's maximum (src/base/Headers.hpp:180 at et-v7.0.0)
-	defaultReplayLimit = 64 << 20        // upstream MAX_BACKUP_BYTES (src/base/BackedWriter.hpp:32 at et-v7.0.0)
+	// defaultKeepAlive is upstream's maximum (src/base/Headers.hpp:180 at
+	// et-v7.0.0).
+	defaultKeepAlive = 5 * time.Second
+	// defaultReplayLimit is upstream's MAX_BACKUP_BYTES
+	// (src/base/BackedWriter.hpp:32 at et-v7.0.0).
+	defaultReplayLimit = 64 << 20
 	dialTimeout        = 10 * time.Second
 
 	// minKeepAlive is the smallest non-zero KeepAlive Dial accepts, a policy
@@ -209,7 +213,8 @@ func (c *Conn) connect(ctx context.Context, first bool) (net.Conn, [][]byte, err
 			// does not decode means a broken or hostile peer (a cut stream
 			// yields an EOF error instead); as on the stream, the session
 			// cannot continue, and redialing would meet it again. Our own
-			// messages are far below the limit.
+			// catchup cannot reach here: writeRecover checks its size
+			// first and fails with ErrReplayExceeded.
 			err = fmt.Errorf("%w: %w", ErrIntegrity, err)
 		}
 		if ctx.Err() != nil && !isFatal(err) {

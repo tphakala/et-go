@@ -249,6 +249,56 @@ func (d tcpStyleDialer) DialContext(ctx context.Context, network, address string
 	return &tcpStyleConn{Conn: c, reset: d.reset}, nil
 }
 
+// When our half of the recover exchange completes and only then the server's
+// CatchupBuffer turns out bad, the exchange still fails with ErrIntegrity:
+// reporting success would drop the server's replayed output.
+func TestRecoverReaderFailsAfterWriterSucceeds(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		bad := append(binary.LittleEndian.AppendUint64(nil, 3), 0xff, 0xff, 0xff) // does not decode
+		s := &scripted{handle: func(i int, c *rawServer) {
+			if i == 0 {
+				c.acceptFrames(1)
+				return
+			}
+			if c.respond(protocol.ConnectStatus_RETURNING_CLIENT) != nil {
+				return
+			}
+			var seq protocol.SequenceHeader
+			if wire.ReadMessage(c.br, &seq) != nil {
+				return
+			}
+			if wire.WriteMessage(c.conn, &protocol.SequenceHeader{}) != nil {
+				return
+			}
+			var theirs protocol.CatchupBuffer
+			if wire.ReadMessage(c.br, &theirs) != nil { // our whole half is now read
+				return
+			}
+			if _, err := c.conn.Write(bad); err == nil {
+				c.drain()
+			}
+		}}
+		d := etcp.Dialer{NetDialer: s}
+		conn, err := d.Dial(t.Context(), testAddr, testID, testKey)
+		if err != nil {
+			t.Fatalf("Dial: %v", err)
+		}
+		defer func() {
+			_ = conn.Close()
+			s.wg.Wait()
+		}()
+		if err := conn.WritePacket(t.Context(), numbered(0, 10)); err != nil {
+			t.Fatalf("WritePacket: %v", err)
+		}
+		if _, err := readPacket(t, conn); !errors.Is(err, etcp.ErrIntegrity) {
+			t.Fatalf("ReadPacket = %v, want ErrIntegrity", err)
+		}
+		if got := s.dials.Load(); got != 2 {
+			t.Fatalf("dials = %d, want 2", got)
+		}
+	})
+}
+
 // As TestBadHandshakeMessageIsFatal below shows for the ConnectResponse, a
 // bad SequenceHeader or CatchupBuffer in the recover exchange ends the Conn,
 // even when our own write is still blocked because the server has not read

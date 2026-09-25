@@ -152,7 +152,7 @@ func TestDialContextCauseMidHandshake(t *testing.T) {
 }
 
 // cancelOnReplyConn cancels its context inside the Read that delivers the
-// first handshake reply's body (past its 8-byte length), so the deadline
+// first handshake reply's body (past its 8-byte length), so the cancellation
 // deterministically lands just as the server's answer arrives.
 type cancelOnReplyConn struct {
 	net.Conn
