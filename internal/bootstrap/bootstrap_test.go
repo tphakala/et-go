@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -21,8 +23,10 @@ import (
 // execute this same binary as "ssh". It needs no shell scripts, so the same
 // tests run in the Windows CI job.
 const (
-	fakeSSHModeEnv = "ET_FAKE_SSH_MODE" // which behaviour the fake shows
-	fakeSSHArgvEnv = "ET_FAKE_SSH_ARGV" // file the fake writes its argv to, as JSON
+	fakeSSHModeEnv     = "ET_FAKE_SSH_MODE"     // which behaviour the fake shows
+	fakeSSHArgvEnv     = "ET_FAKE_SSH_ARGV"     // file the fake writes its argv to, as JSON
+	fakeSSHReadyEnv    = "ET_FAKE_SSH_READY"    // "trap-int": FIFO opened once the handler is installed
+	fakeSSHSignaledEnv = "ET_FAKE_SSH_SIGNALED" // "trap-int": file created when os.Interrupt arrives
 )
 
 func TestMain(m *testing.M) {
@@ -74,8 +78,31 @@ func runFakeSSH(mode string, args []string) int {
 	case "malformed":
 		fmt.Print("IDPASSKEY:abcd\n")
 		return 0
+	case "exit1":
+		// A remote failure with some other status and no output.
+		return 1
 	case "hang":
 		time.Sleep(time.Hour)
+		return 0
+	case "trap-int":
+		// Survives os.Interrupt and records that it arrived, so only the
+		// WaitDelay kill can end it. Opening the FIFO tells the test that the
+		// handler is installed.
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, os.Interrupt)
+		ready, err := os.OpenFile(os.Getenv(fakeSSHReadyEnv), os.O_WRONLY, 0)
+		if err != nil {
+			return 94
+		}
+		_ = ready.Close()
+		<-sig
+		if err := os.WriteFile(os.Getenv(fakeSSHSignaledEnv), nil, 0o600); err != nil {
+			return 95
+		}
+		// Longer than the test's 15s bound, so only the WaitDelay kill ends it
+		// in time, but short enough that a regression which never kills it
+		// does not hold go test's output pipe open for long.
+		time.Sleep(30 * time.Second)
 		return 0
 	}
 	return 93
@@ -115,13 +142,19 @@ func readArgv(t *testing.T, path string) []string {
 
 func TestRunSuccess(t *testing.T) {
 	cfg, argvPath := useFakeSSH(t, "ok")
+	var logs bytes.Buffer
+	cfg.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
 
 	got, err := Run(t.Context(), cfg)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if want := (Credentials{ID: testID, Passkey: testPasskey}); got != want {
-		t.Fatalf("Run() = %#v, want %#v", got, want)
+	if got.ID != testID || got.Passkey != testPasskey {
+		t.Fatalf("Run() = %v with passkey match %v, want id %s and the fake's passkey", got, got.Passkey == testPasskey, testID)
+	}
+	// The server regenerated the credentials, so there is nothing to warn about.
+	if logs.Len() != 0 {
+		t.Fatalf("Run() logged on a normal start: %s", logs.String())
 	}
 
 	args := readArgv(t, argvPath)
@@ -142,7 +175,7 @@ func TestRunIgnoresSSHExitStatusWhenCredentialsArrive(t *testing.T) {
 }
 
 func TestRunWarnsWhenServerDoesNotRegenerate(t *testing.T) {
-	cfg, _ := useFakeSSH(t, "echo-sent")
+	cfg, argvPath := useFakeSSH(t, "echo-sent")
 	var logs bytes.Buffer
 	cfg.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
 
@@ -150,8 +183,9 @@ func TestRunWarnsWhenServerDoesNotRegenerate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if !strings.HasPrefix(got.ID, regeneratePrefix) {
-		t.Fatalf("Run() id = %q, want the echoed placeholder", got.ID)
+	sent := regexp.MustCompile(`^echo '([A-Z2-7]{16})/`).FindStringSubmatch(readArgv(t, argvPath)[2])
+	if len(sent) != 2 || got.ID != sent[1] {
+		t.Fatalf("Run() id = %q, want the placeholder sent in the remote command (%q)", got.ID, sent)
 	}
 	if !strings.Contains(logs.String(), "did not regenerate") {
 		t.Fatalf("no regeneration warning logged; logs: %s", logs.String())
@@ -162,15 +196,21 @@ func TestRunWarnsWhenServerDoesNotRegenerate(t *testing.T) {
 }
 
 func TestRunFailures(t *testing.T) {
+	const (
+		missingHint = "--terminal-path"
+		sshHint     = "ssh could not connect or authenticate"
+	)
 	tests := []struct {
 		mode     string
 		contains []string
+		absent   []string // hints that belong to other exit statuses
 	}{
-		// Review Focus 1: etterminal missing on the server.
-		{"notfound", []string{"etterminal", "status 127", "--terminal-path"}},
-		{"authfail", []string{"status 255", "ssh could not connect or authenticate"}},
-		{"noise", []string{"status 0", `"Welcome to the server"`}},
-		{"malformed", []string{"malformed id", "status 0"}},
+		// etterminal missing on the server.
+		{"notfound", []string{"etterminal", "status 127", missingHint}, []string{sshHint}},
+		{"authfail", []string{"status 255", sshHint}, []string{missingHint}},
+		{"noise", []string{"status 0", `"Welcome to the server"`}, []string{missingHint, sshHint}},
+		{"malformed", []string{"malformed id", "status 0"}, []string{missingHint, sshHint}},
+		{"exit1", []string{"status 1"}, []string{missingHint, sshHint, "; output:"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.mode, func(t *testing.T) {
@@ -182,6 +222,11 @@ func TestRunFailures(t *testing.T) {
 			for _, s := range tt.contains {
 				if !strings.Contains(err.Error(), s) {
 					t.Errorf("error %q does not mention %q", err, s)
+				}
+			}
+			for _, s := range tt.absent {
+				if strings.Contains(err.Error(), s) {
+					t.Errorf("error %q mentions %q, which does not apply", err, s)
 				}
 			}
 			// The marker ends in ':', so printing it bare before ": ssh exited"
@@ -240,9 +285,34 @@ func TestExcerptCutsAtMarker(t *testing.T) {
 	if got := excerpt(out); got != "banner" {
 		t.Fatalf("excerpt() = %q, want %q", got, "banner")
 	}
-	long := bytes.Repeat([]byte("x"), 2*excerptLen)
-	if got := excerpt(long); len(got) != excerptLen+len("...") || !strings.HasPrefix(got, "...") {
-		t.Fatalf("excerpt() of long output has length %d, want %d with a ... prefix", len(got), excerptLen+3)
+	// The end of the output is what explains a failure, so the tail is kept.
+	long := []byte("HEAD" + strings.Repeat("x", 2*excerptLen) + "TAIL")
+	got := excerpt(long)
+	if len(got) != excerptLen+len("...") || !strings.HasPrefix(got, "...") || !strings.HasSuffix(got, "TAIL") || strings.Contains(got, "HEAD") {
+		t.Fatalf("excerpt() of long output = %q (length %d), want the last %d bytes after a ... prefix", got, len(got), excerptLen)
+	}
+}
+
+func TestRunFindsSSHOnPath(t *testing.T) {
+	cfg, _ := useFakeSSH(t, "ok")
+	dir := t.TempDir()
+	name := "ssh"
+	if runtime.GOOS == "windows" {
+		name = "ssh.exe"
+	}
+	self, err := os.ReadFile(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), self, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	cfg.SSH = ""
+
+	got, err := Run(t.Context(), cfg)
+	if err != nil || got.ID != testID {
+		t.Fatalf("Run() = %v, %v; want the fake's credentials through the ssh found on PATH", got, err)
 	}
 }
 
