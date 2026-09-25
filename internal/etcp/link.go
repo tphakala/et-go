@@ -13,11 +13,18 @@ import (
 
 	"github.com/tphakala/et-go/internal/protocol"
 	"github.com/tphakala/et-go/internal/wire"
+	"golang.org/x/crypto/nacl/secretbox"
 )
 
 const (
 	readBufSize  = 64 << 10
 	writeBufSize = 64 << 10
+
+	// maxBatchEntries bounds how many ring entries one writer pass takes: a
+	// framed entry is at least 4+2+secretbox.Overhead bytes, so no pass can
+	// frame more than this many into writeBufSize. Taking the whole backlog
+	// instead would copy it under c.mu on every pass, quadratic in its length.
+	maxBatchEntries = writeBufSize/(4+2+secretbox.Overhead) + 1
 )
 
 var (
@@ -118,7 +125,7 @@ func (c *Conn) writeLoop(ctx context.Context, w io.Writer) error {
 	)
 	for {
 		c.mu.Lock()
-		batch = c.ring.appendRange(batch[:0], c.flushed, c.ring.next())
+		batch = c.ring.appendRange(batch[:0], c.flushed, min(c.ring.next(), c.flushed+maxBatchEntries))
 		c.mu.Unlock()
 		if len(batch) == 0 {
 			select {
