@@ -41,7 +41,7 @@ func (r *ring) appendRange(dst [][]byte, from, to int64) [][]byte {
 }
 
 // since returns a copy of entries [from, to), or false when from is outside
-// the retained window [first, to].
+// the retained window [first, to] or to is past next().
 func (r *ring) since(from, to int64) ([][]byte, bool) {
 	if from < r.first || from > to || to > r.next() {
 		return nil, false
@@ -49,7 +49,8 @@ func (r *ring) since(from, to int64) ([][]byte, bool) {
 	return slices.Clone(r.entries[from-r.first : to-r.first]), true
 }
 
-// bytesBetween sums the sizes of entries [from, to).
+// bytesBetween sums the sizes of entries [from, to). The caller guarantees
+// first <= from <= to <= next().
 func (r *ring) bytesBetween(from, to int64) int {
 	var n int
 	for _, e := range r.entries[from-r.first : to-r.first] {

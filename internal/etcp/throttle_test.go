@@ -59,7 +59,7 @@ func (c throttledConn) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-// Spec section 7: a catchup larger than one idle timeout's worth of bytes on
+// A catchup larger than one idle timeout's worth of bytes on
 // a throttled link must not trip the 30 s handshake idle timeout while bytes
 // keep flowing. About 1 MiB at 8 KiB/s takes over two minutes of fake time.
 func TestThrottledCatchupDoesNotTimeOut(t *testing.T) {

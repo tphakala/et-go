@@ -106,9 +106,10 @@ func TestWriteFrameWriterError(t *testing.T) {
 
 // TestWriteFrameSingleWrite pins the single-Write contract on the success
 // path: WriteFrame must build the length prefix and body in one buffer
-// before writing, not write the header and body separately. etcp relies on
-// this to keep a frame from interleaving with another goroutine's write on
-// the same connection.
+// before writing, not write the header and body separately, so a frame is
+// never split by another goroutine's write on a connection whose Write is
+// safe for concurrent use. etcp's link writer frames with AppendFrame and
+// issues its own single Write per batch.
 func TestWriteFrameSingleWrite(t *testing.T) {
 	w := &countingWriter{}
 	if err := WriteFrame(w, []byte("hello")); err != nil {
@@ -121,7 +122,13 @@ func TestWriteFrameSingleWrite(t *testing.T) {
 
 func TestWriteFrameLimit(t *testing.T) {
 	var buf bytes.Buffer
-	err := WriteFrame(&buf, make([]byte, MaxFrameSize+1))
+	frame := make([]byte, MaxFrameSize+1)
+	var err error
+	// The size is checked before the output buffer is allocated, so an
+	// oversized frame costs no 16 MiB allocation.
+	if got := allocatedBytes(func() { err = WriteFrame(&buf, frame) }); got > 1<<20 {
+		t.Fatalf("WriteFrame allocated %d bytes to reject an oversized frame", got)
+	}
 	if !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("WriteFrame = %v, want ErrTooLarge", err)
 	}

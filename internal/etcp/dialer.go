@@ -37,10 +37,20 @@ const (
 var ErrSessionEnded = fmt.Errorf("etcp: session ended by server: %w", io.EOF)
 
 var (
-	ErrVersion        = errors.New("etcp: protocol version mismatch")
-	ErrIntegrity      = errors.New("etcp: stream integrity failure")
+	// ErrVersion reports that the server speaks another protocol version
+	// (MISMATCHED_PROTOCOL), on the first connect or a redial.
+	ErrVersion = errors.New("etcp: protocol version mismatch")
+	// ErrIntegrity reports a packet that failed authentication or could not
+	// be parsed, or a frame above wire.MaxFrameSize: the stream is out of
+	// step or tampered with and cannot be resumed.
+	ErrIntegrity = errors.New("etcp: stream integrity failure")
+	// ErrReplayExceeded reports that the peer needs packets no longer
+	// retained, is ahead of what was sent, or needs a catchup too large to
+	// send in one message.
 	ErrReplayExceeded = errors.New("etcp: peer needs data beyond the replay window")
-	ErrRejected       = errors.New("etcp: server rejected the session")
+	// ErrRejected reports that the server refused the session: INVALID_KEY
+	// on the first connect, NEW_CLIENT on a redial, or an unknown status.
+	ErrRejected = errors.New("etcp: server rejected the session")
 )
 
 // A Dialer contains options for connecting to an etserver. The zero value is usable.
@@ -85,7 +95,7 @@ type Dialer struct {
 
 // Dial connects and completes the first handshake. It expects NEW_CLIENT; a
 // RETURNING_CLIENT answer (upstream allows it when a first attempt died after
-// registering, src/base/ClientConnection.cpp:36-39) runs the recover exchange
+// registering, src/base/ClientConnection.cpp:35-39 at et-v7.0.0) runs the recover exchange
 // with empty state. INVALID_KEY yields ErrRejected and MISMATCHED_PROTOCOL
 // yields ErrVersion. A passkey that is not 32 bytes, a Probe payload too
 // large for one sealed frame, or a KeepAlive or ReplayLimit outside the range
@@ -207,13 +217,19 @@ func (c *Conn) handshake(conn net.Conn, first bool) ([][]byte, error) {
 		if first {
 			return nil, nil
 		}
+		// Deliberately stricter than upstream, whose client closes the
+		// socket and keeps redialing on any status other than INVALID_KEY
+		// and RETURNING_CLIENT (src/base/ClientConnection.cpp:113-127 at
+		// et-v7.0.0). A server answering NEW_CLIENT has lost the session's
+		// state, and redialing cannot bring it back.
 		return nil, fmt.Errorf("%w: server answered NEW_CLIENT to a returning client", ErrRejected)
 	case protocol.ConnectStatus_RETURNING_CLIENT:
 		// Also possible on the first connect, when an earlier attempt died
 		// after the server registered it. Upstream's client accepts that
 		// answer but then skips the recover exchange
-		// (src/base/ClientConnection.cpp:35-39), although the server always
-		// runs it after RETURNING_CLIENT (src/base/ServerConnection.cpp:117-122).
+		// (src/base/ClientConnection.cpp:35-62 at et-v7.0.0), although the
+		// server always runs it after RETURNING_CLIENT
+		// (src/base/ServerConnection.cpp:117-123).
 		// Running it here with empty state (nothing sent, nothing received)
 		// matches what the server expects.
 		return c.recover(conn)

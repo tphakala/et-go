@@ -32,9 +32,9 @@ func WriteMessage(w io.Writer, m proto.Message) error {
 // the message's zero value, as upstream does. A length above MaxMessageSize
 // (or negative as a signed int64) returns ErrTooLarge without reading the body.
 // The body buffer grows as bytes arrive rather than being allocated at the
-// declared length up front. A stream that ends before the first length byte yields a wrapped io.EOF;
-// one that ends anywhere later, including right after a complete length,
-// yields a wrapped io.ErrUnexpectedEOF.
+// declared length up front. A stream that ends before the first length byte
+// yields a wrapped io.EOF; one that ends anywhere later, including right
+// after a complete length, yields a wrapped io.ErrUnexpectedEOF.
 func ReadMessage(r io.Reader, m proto.Message) error {
 	var hdr [8]byte
 	if k, err := io.ReadFull(r, hdr[:]); err != nil {

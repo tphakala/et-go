@@ -27,8 +27,8 @@ var errWriterSentinel = errors.New("wire_test: writer error")
 // countingWriter is an io.Writer that always succeeds, counting how many
 // times Write was called. WriteFrame and WriteMessage each build their
 // whole output (length prefix and body) in one buffer and issue a single
-// Write; etcp relies on that, since a partial write on a real connection
-// could otherwise interleave with another goroutine's frame.
+// Write, so a frame or message is never split by another goroutine's write
+// on a connection whose Write is safe for concurrent use.
 type countingWriter struct {
 	buf   bytes.Buffer
 	calls int

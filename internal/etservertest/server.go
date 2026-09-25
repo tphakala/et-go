@@ -2,8 +2,7 @@
 // network, so etcp can be tested without sockets and under testing/synctest.
 //
 // The server is written independently of etcp, from upstream EternalTerminal
-// 7.0.0 semantics (~/src/et-build, tag et-v7.0.0), so the two implementations
-// check each other. In particular it writes its whole catchup before reading
+// semantics (tag et-v7.0.0), so the two implementations check each other. In particular it writes its whole catchup before reading
 // the client's, exactly like upstream's Connection::recover
 // (src/base/Connection.cpp:105-143).
 package etservertest
@@ -72,7 +71,8 @@ func NewServer(id, passkey string) *Server {
 // Serve runs one link on c: the connect handshake (and the recover exchange
 // for a returning client), then the encrypted stream, until c fails, the
 // session ends or ctx ends. A newer link replaces an older one, as upstream
-// does.
+// closes the old socket before recovering on the new one
+// (src/base/ServerClientConnection.cpp:27-35 at et-v7.0.0).
 func (s *Server) Serve(ctx context.Context, c net.Conn) error {
 	defer func() { _ = c.Close() }()
 	stop := context.AfterFunc(ctx, func() { _ = c.Close() })
@@ -125,7 +125,10 @@ func (s *Server) admit(req *protocol.ConnectRequest) (status protocol.ConnectSta
 	defer s.mu.Unlock()
 	switch {
 	case req.GetVersion() != protocol.Version:
-		return protocol.ConnectStatus_MISMATCHED_PROTOCOL, "Mismatched protocol"
+		// Upstream's text (src/base/ServerConnection.cpp:55-59 at et-v7.0.0).
+		return protocol.ConnectStatus_MISMATCHED_PROTOCOL, fmt.Sprintf(
+			"Mismatched protocol versions.  Your client & server must be on the same version of ET.  Client: %d != Server: %d",
+			req.GetVersion(), protocol.Version)
 	case req.GetClientId() != s.id || !s.registered:
 		// MEASURED against etserver 7.0.0: the error text for an unknown or
 		// ended session is "Client is not registered".

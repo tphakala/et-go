@@ -243,8 +243,8 @@ func TestNetworkCutAfter(t *testing.T) {
 		if err != nil {
 			t.Fatalf("DialContext: %v", err)
 		}
-		// The 8-byte length prefix of a ConnectRequest exceeds the 5-byte
-		// budget, so the cut lands inside the first message.
+		// An 8-byte write (the size of a handshake length prefix) exceeds
+		// the 5-byte budget, so the cut lands inside it.
 		wrote, err := conn.Write(make([]byte, 8))
 		if wrote != 5 || err == nil {
 			t.Fatalf("Write = %d, %v; want 5 bytes and an error", wrote, err)

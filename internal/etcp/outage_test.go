@@ -28,7 +28,7 @@ func (d *dialClock) DialContext(ctx context.Context, network, address string) (n
 	return d.inner.DialContext(ctx, network, address)
 }
 
-// Review Focus 2: a long outage (laptop asleep, network down). Dials keep
+// A long outage (laptop asleep, network down). Dials keep
 // failing, the delay between them never exceeds 5 s, and once the network
 // returns the session resumes with nothing lost.
 func TestLongOutage(t *testing.T) {

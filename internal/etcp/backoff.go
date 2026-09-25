@@ -24,6 +24,9 @@ func (b *backoff) next() time.Duration {
 	if n == 0 {
 		return 0
 	}
+	// The shift is clamped because backoffBase<<36 overflows int64 and would
+	// yield a negative delay, a hot redial loop; 5 is the first shift at
+	// which backoffBase exceeds backoffMax, so the clamp never lowers a delay.
 	d := min(backoffBase<<min(n-1, 5), backoffMax)
 	j := rand.Float64
 	if b.jitter != nil {

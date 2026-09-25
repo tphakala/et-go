@@ -26,7 +26,12 @@ func AppendFrame(dst, frame []byte) ([]byte, error) {
 // Write call. A writer that reports fewer bytes than it was given yields
 // io.ErrShortWrite.
 func WriteFrame(w io.Writer, frame []byte) error {
-	buf, err := AppendFrame(make([]byte, 0, 4+min(len(frame), MaxFrameSize)), frame)
+	if len(frame) > MaxFrameSize {
+		// Checked before allocating the output buffer, so an oversized
+		// frame costs nothing.
+		return fmt.Errorf("wire: frame of %d bytes: %w", len(frame), ErrTooLarge)
+	}
+	buf, err := AppendFrame(make([]byte, 0, 4+len(frame)), frame)
 	if err != nil {
 		return err
 	}
@@ -40,7 +45,8 @@ func WriteFrame(w io.Writer, frame []byte) error {
 // it is large enough; the 4-byte length is read into buf's storage too, so a
 // reused buf makes ReadFrame allocate nothing. When buf is too small the body
 // buffer grows as bytes arrive rather than being allocated at the declared
-// length up front. The result aliases buf; callers that keep it past the next
+// length up front. The result aliases buf, and every call, even a failed one,
+// may overwrite buf's contents; callers that keep a result past the next
 // ReadFrame must copy it. A length above MaxFrameSize returns ErrTooLarge
 // without reading the body. io.EOF is returned unwrapped only when the stream
 // ends cleanly before a frame starts; a stream that ends anywhere after the

@@ -128,8 +128,9 @@ func (c *Conn) writeRecover(conn net.Conn, gotSeq <-chan error, peer *protocol.S
 		return 0, fmt.Errorf("etcp: read sequence: %w", err)
 	}
 
-	// Read sendSeq exactly once. Packets written after this snapshot are not
-	// in our catchup; the new link sends them because it starts at snap.
+	// Read ring.next(), the send sequence, exactly once. Packets written
+	// after this snapshot are not in our catchup; the new link sends them
+	// because it starts at snap.
 	c.mu.Lock()
 	snap := c.ring.next()
 	ours, ok := c.ring.since(int64(peer.GetSequenceNumber()), snap)

@@ -151,7 +151,12 @@ func (c *Conn) writeLoop(ctx context.Context, w io.Writer) error {
 			n += len(f)
 		}
 		clear(batch) // drop references so trimmed entries can be collected
-		if _, err := w.Write(buf); err != nil {
+		// A short count without an error breaks the io.Writer contract;
+		// counting the whole batch as sent would drop its tail from replay.
+		if m, err := w.Write(buf); err != nil || m != len(buf) {
+			if err == nil {
+				err = io.ErrShortWrite
+			}
 			return fmt.Errorf("etcp: write: %w", err)
 		}
 		c.mu.Lock()

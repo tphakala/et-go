@@ -62,7 +62,10 @@ func TestCatchupBothWays(t *testing.T) {
 	})
 }
 
-// Writes keep arriving while recovery runs; none may be skipped or sent twice.
+// Writes keep arriving across repeated cuts and reconnects; none may be
+// skipped or sent twice. Recovery over net.Pipe takes no fake time, so the
+// cuts rarely land inside a recover exchange; TestWritePacketRacingRecovery
+// pins that race deterministically.
 func TestWriteDuringRecovery(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		h := newHarness(t, etcp.Dialer{})
@@ -216,7 +219,7 @@ func TestIntegrityFailureIsFatal(t *testing.T) {
 }
 
 // A packet written after the recover snapshot is not in our catchup, so the
-// new link must send it. Reading sendSeq a second time at the end of the
+// new link must send it. Reading ring.next() a second time at the end of the
 // exchange would skip it.
 func TestWritePacketRacingRecovery(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
@@ -230,7 +233,9 @@ func TestWritePacketRacingRecovery(t *testing.T) {
 			case 1:
 				c.pausedRecover(snapped, resume, got)
 			default:
-				// Later links only appear if packet 1 was lost; refuse them.
+				// Later links (the watcher may redial, since drain never
+				// echoes probes) end at once; got already holds packet 1's
+				// number, so they cannot change the verdict.
 			}
 		}}
 		d := etcp.Dialer{NetDialer: s}

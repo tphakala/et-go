@@ -44,9 +44,9 @@ func TestBackoffJitterBounds(t *testing.T) {
 			if got := b.next(); got != tt.second {
 				t.Fatalf("second delay = %v, want %v", got, tt.second)
 			}
-			for range 100 {
-				if got := b.next(); got > backoffMax {
-					t.Fatalf("delay %v exceeds cap %v", got, backoffMax)
+			for range 100 { // far past the attempt where an unclamped shift overflows
+				if got := b.next(); got <= 0 || got > backoffMax {
+					t.Fatalf("delay %v outside (0, %v]", got, backoffMax)
 				}
 			}
 		})

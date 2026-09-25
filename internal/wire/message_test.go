@@ -152,9 +152,11 @@ func TestWriteMessageWriterError(t *testing.T) {
 
 // TestWriteMessageSingleWrite pins the single-Write contract on the success
 // path: WriteMessage must build the length prefix and marshaled body in one
-// buffer before writing, not write the header and body separately. etcp
-// relies on this to keep a message from interleaving with another
-// goroutine's write on the same connection.
+// buffer before writing, not write the header and body separately, so that
+// on a connection whose Write is safe for concurrent use a message is never
+// split by another goroutine's write. etcp does not depend on it: each of
+// its connections has one writer at a time, and its handshake conn splits
+// large writes into chunks anyway.
 func TestWriteMessageSingleWrite(t *testing.T) {
 	sh := &protocol.SequenceHeader{}
 	sh.SetSequenceNumber(1)

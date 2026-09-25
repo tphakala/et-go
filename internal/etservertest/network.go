@@ -40,13 +40,17 @@ func NewNetwork(s *Server) *Network {
 	}
 }
 
-// DialContext connects to the server. While SetRefuse(true) is in effect it
-// fails with a *net.OpError.
+// DialContext connects to the server. It fails with a *net.OpError while
+// SetRefuse(true) is in effect and after Close, and with a *net.OpError
+// wrapping ctx.Err() when ctx has already ended, as net.Dialer does.
 func (n *Network) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	n.mu.Lock()
+	defer n.mu.Unlock()
 	n.dials++
-	if n.refuse || n.ctx.Err() != nil || ctx.Err() != nil {
-		n.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, &net.OpError{Op: "dial", Net: network, Err: err}
+	}
+	if n.refuse || n.ctx.Err() != nil {
 		return nil, &net.OpError{Op: "dial", Net: network, Err: errRefused}
 	}
 	budget := n.cutAfter
@@ -56,8 +60,8 @@ func (n *Network) DialContext(ctx context.Context, network, address string) (net
 	p.client = &pipeEnd{Conn: client, p: p}
 	p.server = &pipeEnd{Conn: server, p: p}
 	n.pairs[p] = struct{}{}
-	n.mu.Unlock()
-
+	// Started under n.mu, so Close, whose CutAll takes n.mu before its
+	// wg.Wait, cannot wait on the group before this goroutine is added.
 	n.wg.Go(func() {
 		_ = n.srv.Serve(n.ctx, p.server)
 		p.close()

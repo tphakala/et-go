@@ -43,8 +43,9 @@ type Conn struct {
 	flushed int64 // next sequence number the current link writer sends
 	unsent  int   // bytes of entries at or after flushed
 
-	// in and recvSeq belong to whichever goroutine reads: a link reader, or
-	// the supervisor during recovery, never both at once.
+	// in and recvSeq belong to whichever goroutine reads: a link reader, the
+	// supervisor during recovery, or Dial's caller during a first-connect
+	// recovery, never two at once.
 	in      *seal.Stream
 	recvSeq int64
 
@@ -117,8 +118,10 @@ func (c *Conn) ReadPacket(ctx context.Context) (protocol.Packet, error) {
 	}
 }
 
-// Close shuts the connection down and waits for its goroutines. The server
-// keeps the session; a later client cannot resume it (the replay state is gone).
+// Close shuts the connection down and waits for its goroutines. Afterwards
+// WritePacket returns net.ErrClosed, and ReadPacket returns any packets that
+// had already arrived and then net.ErrClosed. The server keeps the session;
+// a later client cannot resume it (the replay state is gone).
 func (c *Conn) Close() error {
 	c.cancel(errClosed)
 	c.wg.Wait()

@@ -41,10 +41,10 @@ var ErrShortPacket = errors.New("wire: packet shorter than its 2-byte header")
 // caller's buffer; the buffer then doubles as bytes arrive.
 const growChunk = 64 << 10
 
-// bodyErr maps io.EOF from a body read to io.ErrUnexpectedEOF. io.ReadFull
-// returns io.EOF when no byte at all was read, which for a body means the
-// stream was cut after a complete length prefix: a broken link, not a clean
-// end of stream.
+// bodyErr maps an io.EOF (possibly wrapped) from a body read to
+// io.ErrUnexpectedEOF. A body read happens only after a complete length
+// prefix, so an end of stream there, whether before the first body byte or
+// between two growth chunks, is a broken link, not a clean end of stream.
 func bodyErr(err error) error {
 	if errors.Is(err, io.EOF) {
 		return io.ErrUnexpectedEOF
