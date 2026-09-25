@@ -28,8 +28,14 @@ type Console struct {
 	tty  *os.File
 	base *term.State // terminal state when the console was opened
 
-	mu      sync.Mutex
-	restore func() error // set by MakeRaw, run by Close
+	// setState applies a terminal state. It is term.Restore, held in a
+	// field so a test can count the calls restore makes.
+	setState func(fd int, s *term.State) error
+
+	// mu serialises MakeRaw, restore, Size and Close. Close holds it for
+	// its whole body, so a second Close waits for the first to finish.
+	mu     sync.Mutex
+	closed bool // guarded by mu
 }
 
 // Open returns the console attached to stdin and stdout. It returns an error
@@ -65,7 +71,7 @@ func open(ttyPath string, stdin, stdout *os.File) (*Console, error) {
 // newConsole wraps an already open terminal file and records its current
 // state as the baseline. Tests pass a pty slave.
 func newConsole(tty *os.File) (*Console, error) {
-	c := &Console{tty: tty}
+	c := &Console{tty: tty, setState: term.Restore}
 	err := c.control(func(fd int) error {
 		var gerr error
 		c.base, gerr = term.GetState(fd)
@@ -77,11 +83,25 @@ func newConsole(tty *os.File) (*Console, error) {
 	return c, nil
 }
 
-// MakeRaw switches the terminal to raw mode. The returned restore func
-// returns the terminal to the state recorded by Open, not to whatever mode
-// was current when MakeRaw ran. It is idempotent and safe to call from any
-// goroutine; Close also calls it.
+// MakeRaw switches the terminal to raw mode. It may be called again after
+// restore; Close still returns the terminal to the Open baseline. After
+// Close it returns an error satisfying errors.Is(err, os.ErrClosed) and
+// leaves the terminal alone.
+//
+// The returned restore func returns the terminal to the state recorded by
+// Open, not to whatever mode was current when MakeRaw ran. Every restore
+// func does this whenever it runs, including one kept from an earlier
+// MakeRaw, so running a stale one during a later raw session leaves raw
+// mode. It reads the current state first and sets the baseline only when
+// they differ, so it is repeatable and leaves a terminal already at the
+// baseline untouched. It is safe to call from any goroutine. After Close it
+// returns nil without touching the terminal, which Close already restored.
 func (c *Console) MakeRaw() (restore func() error, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil, fmt.Errorf("console: make raw: %w", os.ErrClosed)
+	}
 	err = c.control(func(fd int) error {
 		_, rerr := term.MakeRaw(fd)
 		return rerr
@@ -89,16 +109,38 @@ func (c *Console) MakeRaw() (restore func() error, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("console: make raw: %w", err)
 	}
-	restore = sync.OnceValue(func() error {
-		if err := c.control(func(fd int) error { return term.Restore(fd, c.base) }); err != nil {
-			return fmt.Errorf("console: restore: %w", err)
-		}
-		return nil
-	})
+	return c.restore, nil
+}
+
+// restore is the func MakeRaw returns; see MakeRaw.
+func (c *Console) restore() error {
 	c.mu.Lock()
-	c.restore = restore
-	c.mu.Unlock()
-	return restore, nil
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	return c.restoreLocked()
+}
+
+// restoreLocked sets the Open baseline if the current state differs from
+// it. Only setting the state can stop a background job (SIGTTOU; reading it
+// cannot), so a terminal already at the baseline is left untouched. c.mu
+// must be held.
+func (c *Console) restoreLocked() error {
+	err := c.control(func(fd int) error {
+		cur, err := term.GetState(fd)
+		if err != nil {
+			return err
+		}
+		if *cur == *c.base {
+			return nil
+		}
+		return c.setState(fd, c.base)
+	})
+	if err != nil {
+		return fmt.Errorf("console: restore: %w", err)
+	}
+	return nil
 }
 
 // Read reads raw input bytes. A pending Read returns os.ErrClosed once Close
@@ -106,11 +148,19 @@ func (c *Console) MakeRaw() (restore func() error, err error) {
 // measured on darwin).
 func (c *Console) Read(p []byte) (int, error) { return c.tty.Read(p) }
 
-// Write writes remote output to the terminal.
+// Write writes remote output to the terminal. After Close it returns an
+// error satisfying errors.Is(err, os.ErrClosed), which os.File reports for
+// a closed file.
 func (c *Console) Write(p []byte) (int, error) { return c.tty.Write(p) }
 
-// Size returns the current window size, including pixels when known.
+// Size returns the current window size, including pixels when known. After
+// Close it returns an error satisfying errors.Is(err, os.ErrClosed).
 func (c *Console) Size() (Size, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return Size{}, fmt.Errorf("console: size: %w", os.ErrClosed)
+	}
 	var ws *unix.Winsize
 	err := c.control(func(fd int) error {
 		var gerr error
@@ -171,18 +221,29 @@ func (c *Console) Resizes(ctx context.Context) iter.Seq[Size] {
 	}
 }
 
-// Close restores the terminal mode if MakeRaw was called, then closes the
-// terminal, which unblocks a pending Read (MEASURED on Linux against a pty
-// in the package tests, not yet measured on darwin).
+// Close returns the terminal to the state recorded by Open whether or not
+// MakeRaw was called, so a mode an interrupted prompt left behind is undone
+// too, then closes the terminal. Like a restore func, it sets the baseline
+// only when the current state differs from it. Closing the terminal
+// unblocks a pending Read, which returns os.ErrClosed (MEASURED on Linux
+// against a pty in the package tests, not yet measured on darwin).
+//
+// Close is idempotent. A second Close that runs while the first is still in
+// progress waits for the first to finish, then returns nil; a Close after
+// that returns nil at once. Only the first Close reports errors.
+//
+// Close does not discard typeahead the reader has not consumed; it stays
+// queued for the next reader of the terminal. OpenSSH does the same: its
+// leave_raw_mode (sshtty.c) restores with tcsetattr TCSADRAIN, which does
+// not flush input. On Windows, Close flushes the input buffer instead.
 func (c *Console) Close() error {
 	c.mu.Lock()
-	restore := c.restore
-	c.mu.Unlock()
-	var rerr error
-	if restore != nil {
-		rerr = restore()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
 	}
-	return errors.Join(rerr, c.tty.Close())
+	c.closed = true
+	return errors.Join(c.restoreLocked(), c.tty.Close())
 }
 
 // control runs f with the terminal's file descriptor.

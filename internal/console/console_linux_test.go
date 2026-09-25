@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	"golang.org/x/term"
 )
 
 // waitTimeout bounds every wait on a real file descriptor; synctest cannot
@@ -153,6 +154,244 @@ func TestRestoreReturnsToOpenBaseline(t *testing.T) {
 	}
 	if after := termios(t, slave); after.Lflag != baseline.Lflag {
 		t.Fatalf("after restore Lflag = %#x, want the Open baseline %#x (echo on)", after.Lflag, baseline.Lflag)
+	}
+
+	// restore is repeatable: after the mode changes again, a second call
+	// returns to the baseline too.
+	setTermios(t, slave, &degraded)
+	if err := restore(); err != nil {
+		t.Fatalf("second restore: %v", err)
+	}
+	if after := termios(t, slave); after.Lflag != baseline.Lflag {
+		t.Fatalf("after a second restore Lflag = %#x, want the Open baseline %#x", after.Lflag, baseline.Lflag)
+	}
+}
+
+// probeTTY opens a second descriptor on the terminal behind slave, to
+// inspect and change it after the Console closed its own.
+func probeTTY(t *testing.T, slave *os.File) *os.File {
+	t.Helper()
+	probe, err := os.OpenFile(slave.Name(), os.O_RDWR|unix.O_NOCTTY, 0)
+	if err != nil {
+		t.Fatalf("reopen slave: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Close() })
+	return probe
+}
+
+func setTermios(t *testing.T, f *os.File, tio *unix.Termios) {
+	t.Helper()
+	if err := controlFile(f, func(fd int) error {
+		return unix.IoctlSetTermios(fd, unix.TCSETS, tio)
+	}); err != nil {
+		t.Fatalf("tcsets: %v", err)
+	}
+}
+
+// withEchoOff clears ECHO on f and returns the termios it had before.
+func withEchoOff(t *testing.T, f *os.File) *unix.Termios {
+	t.Helper()
+	before := termios(t, f)
+	degraded := *before
+	degraded.Lflag &^= unix.ECHO
+	setTermios(t, f, &degraded)
+	return before
+}
+
+// TestCloseRestoresBaselineWithoutMakeRaw models ssh interrupted at a
+// password prompt with echo off and et closing before MakeRaw ran: Close
+// must still return the terminal to the Open baseline.
+func TestCloseRestoresBaselineWithoutMakeRaw(t *testing.T) {
+	_, slave := openPTY(t)
+	probe := probeTTY(t, slave)
+	c := mustConsole(t, slave)
+	baseline := withEchoOff(t, probe)
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if after := termios(t, probe); after.Lflag != baseline.Lflag {
+		t.Fatalf("after Close Lflag = %#x, want the Open baseline %#x (echo on)", after.Lflag, baseline.Lflag)
+	}
+}
+
+// TestCloseTwice checks that a Close that starts while another is still
+// restoring waits for it and returns nil, and that a Close after both
+// returns nil at once.
+func TestCloseTwice(t *testing.T) {
+	_, slave := openPTY(t)
+	probe := probeTTY(t, slave)
+	c := mustConsole(t, slave)
+	baseline := withEchoOff(t, probe) // so the first Close has a mode to set
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	set := c.setState
+	c.setState = func(fd int, s *term.State) error {
+		close(entered)
+		<-release
+		return set(fd, s)
+	}
+
+	first := make(chan error, 1)
+	go func() { first <- c.Close() }()
+	select {
+	case <-entered:
+	case <-time.After(waitTimeout):
+		t.Fatal("the first Close never reached the terminal restore")
+	}
+
+	second := make(chan error, 1)
+	go func() { second <- c.Close() }()
+	select {
+	case err := <-second:
+		close(release)
+		t.Fatalf("a second Close returned (%v) while the first was still restoring", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+
+	for name, ch := range map[string]chan error{"first": first, "second": second} {
+		select {
+		case err := <-ch:
+			if err != nil {
+				t.Fatalf("%s Close = %v, want nil", name, err)
+			}
+		case <-time.After(waitTimeout):
+			t.Fatalf("%s Close never returned", name)
+		}
+	}
+	if after := termios(t, probe); after.Lflag != baseline.Lflag {
+		t.Fatalf("after Close Lflag = %#x, want the Open baseline %#x", after.Lflag, baseline.Lflag)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close after Close = %v, want nil", err)
+	}
+}
+
+func TestWriteAfterClose(t *testing.T) {
+	_, slave := openPTY(t)
+	c := mustConsole(t, slave)
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if n, err := c.Write([]byte("x")); n != 0 || !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("Write after Close = %d, %v; want 0, os.ErrClosed", n, err)
+	}
+}
+
+func TestMakeRawAfterClose(t *testing.T) {
+	_, slave := openPTY(t)
+	probe := probeTTY(t, slave)
+	c := mustConsole(t, slave)
+	before := termios(t, probe)
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	restore, err := c.MakeRaw()
+	if restore != nil || !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("MakeRaw after Close = (restore set: %t), %v; want nil, os.ErrClosed", restore != nil, err)
+	}
+	if after := termios(t, probe); after.Lflag != before.Lflag {
+		t.Fatalf("MakeRaw after Close changed Lflag to %#x, want %#x", after.Lflag, before.Lflag)
+	}
+}
+
+// TestRestoreAfterClose checks that a restore func run after Close returns
+// nil and leaves the terminal alone: Close already restored it.
+func TestRestoreAfterClose(t *testing.T) {
+	_, slave := openPTY(t)
+	probe := probeTTY(t, slave)
+	c := mustConsole(t, slave)
+	restore, err := c.MakeRaw()
+	if err != nil {
+		t.Fatalf("MakeRaw: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Another program now owns the terminal and turned echo off.
+	withEchoOff(t, probe)
+	changed := termios(t, probe)
+
+	if err := restore(); err != nil {
+		t.Fatalf("restore after Close = %v, want nil", err)
+	}
+	if after := termios(t, probe); after.Lflag != changed.Lflag {
+		t.Fatalf("restore after Close changed Lflag to %#x, want it left at %#x", after.Lflag, changed.Lflag)
+	}
+}
+
+// TestCloseRestoresAfterSecondMakeRaw covers raw mode entered again after a
+// restore: Close must still return to the baseline.
+func TestCloseRestoresAfterSecondMakeRaw(t *testing.T) {
+	_, slave := openPTY(t)
+	probe := probeTTY(t, slave)
+	c := mustConsole(t, slave)
+	baseline := termios(t, probe)
+
+	restore, err := c.MakeRaw()
+	if err != nil {
+		t.Fatalf("MakeRaw: %v", err)
+	}
+	if err := restore(); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if _, err := c.MakeRaw(); err != nil {
+		t.Fatalf("second MakeRaw: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if after := termios(t, probe); after.Lflag != baseline.Lflag {
+		t.Fatalf("after Close Lflag = %#x, want the Open baseline %#x", after.Lflag, baseline.Lflag)
+	}
+}
+
+func TestSizeAfterClose(t *testing.T) {
+	_, slave := openPTY(t)
+	c := mustConsole(t, slave)
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := c.Size(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("Size after Close = %v, want an error wrapping os.ErrClosed", err)
+	}
+}
+
+// TestRestoreSkipsUnchangedMode checks that restore and Close do not set a
+// terminal that is already at the baseline. Setting it from a background
+// job would stop et with SIGTTOU, but the test pty is opened with O_NOCTTY
+// and is not the test's controlling terminal, so job control never applies
+// here; the set calls are counted through c.setState instead.
+func TestRestoreSkipsUnchangedMode(t *testing.T) {
+	_, slave := openPTY(t)
+	c := mustConsole(t, slave)
+	sets := 0
+	set := c.setState
+	c.setState = func(fd int, s *term.State) error {
+		sets++
+		return set(fd, s)
+	}
+
+	restore, err := c.MakeRaw()
+	if err != nil {
+		t.Fatalf("MakeRaw: %v", err)
+	}
+	if err := restore(); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if sets != 1 {
+		t.Fatalf("restore from raw mode made %d set calls, want 1", sets)
+	}
+	if err := restore(); err != nil {
+		t.Fatalf("second restore: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if sets != 1 {
+		t.Fatalf("restore and Close at the baseline made %d more set calls, want 0", sets-1)
 	}
 }
 

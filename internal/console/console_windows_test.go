@@ -46,25 +46,193 @@ func TestCtrlHandler(t *testing.T) {
 // TestReadAfterCloseIgnoresPending needs no console: a closed Console must
 // not hand out bytes buffered from an earlier console read.
 func TestReadAfterCloseIgnoresPending(t *testing.T) {
-	c := &Console{pending: []byte("left over"), closing: true}
+	c := newConsole(0, 0)
+	c.pending = []byte("left over")
+	c.closing = true
 	n, err := c.Read(make([]byte, 16))
 	if n != 0 || !errors.Is(err, os.ErrClosed) {
 		t.Fatalf("Read after Close = %d, %v; want 0, os.ErrClosed", n, err)
 	}
 }
 
-// TestCloseIsIdempotent needs no console: a Close that finds another Close
-// already in progress (closing set, reader still in flight) must return nil
-// at once instead of waiting for the reader and reporting an error.
+// The tests below that need no console build it on zero handles: the
+// console calls Close makes on them (flush, mode read) fail, so the first
+// Close returns an error, which these tests do not inspect unless they say
+// so.
+
+// consoleFreeWait bounds waits in console-free tests.
+const consoleFreeWait = 5 * time.Second
+
+// stillRunning is how long a console-free test watches a call that must
+// stay blocked. When the code under test is broken such a call makes only
+// failing console calls and returns almost at once, so the bound only has
+// to exceed scheduling noise.
+const stillRunning = 200 * time.Millisecond
+
+// closeAsync runs c.Close on its own goroutine.
+func closeAsync(c *Console) <-chan error {
+	ch := make(chan error, 1)
+	go func() { ch <- c.Close() }()
+	return ch
+}
+
+func recv(t *testing.T, ch <-chan error, what string) error {
+	t.Helper()
+	select {
+	case err := <-ch:
+		return err
+	case <-time.After(consoleFreeWait):
+		t.Fatalf("%s never returned", what)
+		return nil
+	}
+}
+
+// TestCloseIsIdempotent needs no console: once the first Close has
+// finished, later calls return nil at once, without its error.
 func TestCloseIsIdempotent(t *testing.T) {
-	c := &Console{closing: true, reading: true, exited: make(chan struct{}, 1)}
-	start := time.Now()
-	if err := c.Close(); err != nil {
-		t.Fatalf("Close during Close = %v, want nil", err)
+	c := newConsole(0, 0)
+	_ = recv(t, closeAsync(c), "first Close")
+	for i := range 2 {
+		if err := recv(t, closeAsync(c), "Close after Close"); err != nil {
+			t.Fatalf("Close %d after the first = %v, want nil", i+1, err)
+		}
 	}
-	if d := time.Since(start); d > 100*time.Millisecond {
-		t.Fatalf("Close during Close took %v, want an immediate return", d)
+}
+
+// TestConcurrentCloseWaits needs no console: a Close that starts while the
+// first Close is still waking the reader must wait for it, then return nil.
+func TestConcurrentCloseWaits(t *testing.T) {
+	c := newConsole(0, 0)
+	c.reading = true // the first Close takes the wake path
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	c.injectFn = func(windows.Handle, []inputRecord) error {
+		select {
+		case <-entered:
+		default:
+			close(entered)
+			<-release
+		}
+		// The reader returns. A later tick may inject again before Close
+		// consumes this, so do not block on a full channel.
+		select {
+		case c.exited <- struct{}{}:
+		default:
+		}
+		return nil
 	}
+
+	first := closeAsync(c)
+	select {
+	case <-entered:
+	case <-time.After(consoleFreeWait):
+		t.Fatal("the first Close never tried to wake the reader")
+	}
+	second := closeAsync(c)
+	select {
+	case err := <-second:
+		close(release)
+		t.Fatalf("a second Close returned (%v) while the first was still in progress", err)
+	case <-time.After(stillRunning):
+	}
+	close(release)
+	_ = recv(t, first, "first Close")
+	if err := recv(t, second, "second Close"); err != nil {
+		t.Fatalf("second Close = %v, want nil", err)
+	}
+}
+
+// TestWakeRetriesAfterInjectError needs no console: a failed wake injection
+// must not end Close's wait for the reader; the next tick injects again.
+func TestWakeRetriesAfterInjectError(t *testing.T) {
+	c := newConsole(0, 0)
+	c.reading = true
+	errInject := errors.New("injected failure")
+	calls := 0
+	c.injectFn = func(windows.Handle, []inputRecord) error {
+		calls++
+		if calls == 1 {
+			return errInject
+		}
+		select {
+		case c.exited <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+	err := c.Close()
+	if calls < 2 {
+		t.Fatalf("Close injected %d wake records, want a retry after the failed one", calls)
+	}
+	if errors.Is(err, errInject) {
+		t.Fatalf("Close = %v, want no wake error once the reader returned", err)
+	}
+}
+
+func TestWriteAfterClose(t *testing.T) {
+	c := newConsole(0, 0)
+	c.writeFn = func(windows.Handle, *uint16, uint32, *uint32, *byte) error {
+		t.Error("Write after Close reached the console")
+		return nil
+	}
+	_ = c.Close()
+	if n, err := c.Write([]byte("x")); n != 0 || !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("Write after Close = %d, %v; want 0, os.ErrClosed", n, err)
+	}
+}
+
+func TestMakeRawAfterClose(t *testing.T) {
+	c := newConsole(0, 0)
+	_ = c.Close()
+	restore, err := c.MakeRaw()
+	if restore != nil || !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("MakeRaw after Close = (restore set: %t), %v; want nil, os.ErrClosed", restore != nil, err)
+	}
+}
+
+func TestSizeAfterClose(t *testing.T) {
+	c := newConsole(0, 0)
+	_ = c.Close()
+	if _, err := c.Size(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("Size after Close = %v, want an error wrapping os.ErrClosed", err)
+	}
+}
+
+// TestCloseWaitsForInFlightWrite needs no console: a Write in progress when
+// Close starts must finish before Close restores the modes and returns.
+func TestCloseWaitsForInFlightWrite(t *testing.T) {
+	c := newConsole(0, 0)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	c.writeFn = func(_ windows.Handle, _ *uint16, n uint32, written *uint32, _ *byte) error {
+		close(entered)
+		<-release
+		*written = n
+		return nil
+	}
+	wrote := make(chan error, 1)
+	go func() {
+		_, err := c.Write([]byte("x"))
+		wrote <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(consoleFreeWait):
+		t.Fatal("Write never reached the console")
+	}
+
+	closed := closeAsync(c)
+	select {
+	case <-closed:
+		close(release)
+		t.Fatal("Close returned while a Write was still in progress")
+	case <-time.After(stillRunning):
+	}
+	close(release)
+	if err := recv(t, wrote, "Write"); err != nil {
+		t.Fatalf("in-flight Write = %v, want nil", err)
+	}
+	_ = recv(t, closed, "Close")
 }
 
 // openConsole returns the real console, or skips when the test binary has
@@ -190,6 +358,64 @@ func TestRestoreReturnsToOpenBaseline(t *testing.T) {
 	}
 	if mode != c.inBase {
 		t.Fatalf("input mode after restore = %#x, want the Open baseline %#x", mode, c.inBase)
+	}
+}
+
+// echoOff turns echo off on c's input, as ssh.exe interrupted at a password
+// prompt can leave it, and restores the Open baseline when the test ends.
+func echoOff(t *testing.T, c *Console) uint32 {
+	t.Helper()
+	if c.inBase&windows.ENABLE_ECHO_INPUT == 0 {
+		t.Skipf("Open-time input mode %#x has echo off already", c.inBase)
+	}
+	t.Cleanup(func() { _ = windows.SetConsoleMode(c.in, c.inBase) })
+	degraded := c.inBase &^ windows.ENABLE_ECHO_INPUT
+	if err := windows.SetConsoleMode(c.in, degraded); err != nil {
+		t.Fatalf("degrade input mode: %v", err)
+	}
+	return degraded
+}
+
+func inputMode(t *testing.T, c *Console) uint32 {
+	t.Helper()
+	var mode uint32
+	if err := windows.GetConsoleMode(c.in, &mode); err != nil {
+		t.Fatalf("GetConsoleMode: %v", err)
+	}
+	return mode
+}
+
+// TestCloseRestoresBaselineWithoutMakeRaw covers et closing before MakeRaw
+// ran, after a prompt left echo off: Close must still restore the baseline.
+func TestCloseRestoresBaselineWithoutMakeRaw(t *testing.T) {
+	c := openConsole(t)
+	echoOff(t, c)
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if mode := inputMode(t, c); mode != c.inBase {
+		t.Fatalf("input mode after Close = %#x, want the Open baseline %#x", mode, c.inBase)
+	}
+}
+
+// TestRestoreAfterClose checks that a restore func run after Close returns
+// nil and leaves the console alone: Close already restored it.
+func TestRestoreAfterClose(t *testing.T) {
+	c := openConsole(t)
+	restore, err := c.MakeRaw()
+	if err != nil {
+		t.Fatalf("MakeRaw: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Another program now owns the console and turned echo off.
+	changed := echoOff(t, c)
+	if err := restore(); err != nil {
+		t.Fatalf("restore after Close = %v, want nil", err)
+	}
+	if mode := inputMode(t, c); mode != changed {
+		t.Fatalf("restore after Close set input mode %#x, want it left at %#x", mode, changed)
 	}
 }
 

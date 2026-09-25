@@ -39,12 +39,26 @@ type Console struct {
 	in, out         windows.Handle
 	inBase, outBase uint32 // console modes when the console was opened
 
+	// mu guards the flags below and is held across every console mode
+	// change, so MakeRaw, restore and Close never interleave their
+	// SetConsoleMode calls.
 	mu      sync.Mutex
-	restore func() error // set by MakeRaw, run by Close
-	closing bool         // guarded by mu
-	reading bool         // guarded by mu: a ReadConsoleW call is in flight
+	closing bool // guarded by mu: Close has started
+	reading bool // guarded by mu: a ReadConsoleW call is in flight
+
+	// wmu is held by Write for its whole call and by Close before it
+	// restores the modes, so a Write in flight when Close starts finishes
+	// under the modes it started with.
+	wmu sync.Mutex
 
 	exited chan struct{} // receives once when a reader returns after Close
+	done   chan struct{} // closed when the first Close has finished
+
+	// injectFn appends input records (WriteConsoleInputW) and writeFn
+	// writes UTF-16 units (WriteConsoleW). nil means the real call; tests
+	// set fakes to run without a console.
+	injectFn func(h windows.Handle, recs []inputRecord) error
+	writeFn  func(h windows.Handle, buf *uint16, n uint32, written *uint32, reserved *byte) error
 
 	// Reader-owned state.
 	dec     utf16Decoder
@@ -72,25 +86,48 @@ func Open() (*Console, error) {
 	if err != nil {
 		return nil, fmt.Errorf("console: stdout handle: %w", err)
 	}
-	c := &Console{
-		in:     in,
-		out:    out,
-		exited: make(chan struct{}, 1),
-		units:  make([]uint16, readUnits),
-	}
+	c := newConsole(in, out)
 	if windows.GetConsoleMode(in, &c.inBase) != nil || windows.GetConsoleMode(out, &c.outBase) != nil {
 		return nil, ErrNotTerminal
 	}
 	return c, nil
 }
 
+// newConsole returns a Console on the given handles with its channels and
+// read buffer set up. Open records the baseline modes; tests that need no
+// console pass zero handles.
+func newConsole(in, out windows.Handle) *Console {
+	return &Console{
+		in:     in,
+		out:    out,
+		exited: make(chan struct{}, 1),
+		done:   make(chan struct{}),
+		units:  make([]uint16, readUnits),
+	}
+}
+
 // MakeRaw switches the console to raw VT input and VT output processing,
 // starting from the modes recorded by Open. Code pages are not touched: Read
-// and Write use the UTF-16 console APIs, which bypass them. The returned
-// restore func returns to the Open baseline, not to whatever mode was
-// current when MakeRaw ran. It is idempotent and safe to call from any
-// goroutine; Close also calls it.
+// and Write use the UTF-16 console APIs, which bypass them. It may be
+// called again after restore; Close still returns the console to the Open
+// baseline. Once Close has started it returns an error satisfying
+// errors.Is(err, os.ErrClosed) and leaves the console alone.
+//
+// The returned restore func returns the console to the modes recorded by
+// Open, not to whatever mode was current when MakeRaw ran. Every restore
+// func does this whenever it runs, including one kept from an earlier
+// MakeRaw, so running a stale one during a later raw session leaves raw
+// mode. It reads the current modes first and sets the baseline only where
+// they differ, so it is repeatable and leaves a console already at the
+// baseline untouched. It is safe to call from any goroutine. Once Close has
+// started it returns nil without touching the console, which Close
+// restores.
 func (c *Console) MakeRaw() (restore func() error, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closing {
+		return nil, fmt.Errorf("console: make raw: %w", os.ErrClosed)
+	}
 	// &^ clears only the listed flags, so ENABLE_EXTENDED_FLAGS and
 	// ENABLE_QUICK_EDIT_MODE keep whatever GetConsoleMode reported and Quick
 	// Edit stays as the user set it (MEASURED on win11-qa ConPTY: input mode
@@ -112,20 +149,41 @@ func (c *Console) MakeRaw() (restore func() error, err error) {
 		}
 	}
 
-	restore = sync.OnceValue(func() error {
-		err := errors.Join(
-			windows.SetConsoleMode(c.in, c.inBase),
-			windows.SetConsoleMode(c.out, c.outBase),
-		)
-		if err != nil {
-			return fmt.Errorf("console: restore: %w", err)
-		}
-		return nil
-	})
+	return c.restore, nil
+}
+
+// restore is the func MakeRaw returns; see MakeRaw.
+func (c *Console) restore() error {
 	c.mu.Lock()
-	c.restore = restore
-	c.mu.Unlock()
-	return restore, nil
+	defer c.mu.Unlock()
+	if c.closing {
+		return nil
+	}
+	return c.restoreLocked()
+}
+
+// restoreLocked sets each handle back to its Open baseline mode where the
+// current mode differs from it. c.mu must be held.
+func (c *Console) restoreLocked() error {
+	err := errors.Join(
+		setModeIfChanged(c.in, c.inBase),
+		setModeIfChanged(c.out, c.outBase),
+	)
+	if err != nil {
+		return fmt.Errorf("console: restore: %w", err)
+	}
+	return nil
+}
+
+func setModeIfChanged(h windows.Handle, mode uint32) error {
+	var cur uint32
+	if err := windows.GetConsoleMode(h, &cur); err != nil {
+		return err
+	}
+	if cur == mode {
+		return nil
+	}
+	return windows.SetConsoleMode(h, mode)
 }
 
 // Read reads raw VT input as UTF-8. Once Close has run, Read returns
@@ -177,12 +235,29 @@ func (c *Console) Read(p []byte) (int, error) {
 // reached the screen: the UTF-16 units are not mapped back to input bytes.
 // io.Writer allows any n < len(p) with a non-nil error, and callers treat a
 // console write error as fatal.
+//
+// Once Close has started Write returns an error satisfying
+// errors.Is(err, os.ErrClosed) and writes nothing. A Write already in
+// progress when Close starts finishes first: Close restores the console
+// modes only after it returns.
 func (c *Console) Write(p []byte) (int, error) {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	c.mu.Lock()
+	closing := c.closing
+	c.mu.Unlock()
+	if closing {
+		return 0, os.ErrClosed
+	}
+	write := c.writeFn
+	if write == nil {
+		write = writeConsole
+	}
 	c.buf = c.enc.append(c.buf[:0], p)
 	for units := c.buf; len(units) > 0; {
 		chunk := units[:chunkLen(units, writeUnits)]
 		var n uint32
-		if err := writeConsole(c.out, &chunk[0], uint32(len(chunk)), &n, nil); err != nil {
+		if err := write(c.out, &chunk[0], uint32(len(chunk)), &n, nil); err != nil {
 			return 0, fmt.Errorf("console: write: %w", err)
 		}
 		if n == 0 {
@@ -194,8 +269,15 @@ func (c *Console) Write(p []byte) (int, error) {
 }
 
 // Size returns the visible window size in character cells. Windows does not
-// report pixel sizes, so Width and Height are 0.
+// report pixel sizes, so Width and Height are 0. Once Close has started it
+// returns an error satisfying errors.Is(err, os.ErrClosed).
 func (c *Console) Size() (Size, error) {
+	c.mu.Lock()
+	closing := c.closing
+	c.mu.Unlock()
+	if closing {
+		return Size{}, fmt.Errorf("console: size: %w", os.ErrClosed)
+	}
 	var info windows.ConsoleScreenBufferInfo
 	if err := windows.GetConsoleScreenBufferInfo(c.out, &info); err != nil {
 		return Size{}, fmt.Errorf("console: size: %w", err)
@@ -233,12 +315,19 @@ func (c *Console) Resizes(ctx context.Context) iter.Seq[Size] {
 	}
 }
 
-// Close restores the console mode if MakeRaw was called and unblocks a
-// pending Read, which then returns os.ErrClosed. The handles are the
-// process's standard handles and stay open. Close is idempotent: later
-// calls return nil at once. A second Close that runs while the first is
-// still in progress also returns nil at once, possibly before the first
-// has flushed the input and restored the mode.
+// Close returns the console to the modes recorded by Open whether or not
+// MakeRaw was called, so a mode an interrupted prompt left behind is undone
+// too. Like a restore func, it sets a baseline mode only where the current
+// mode differs from it. Close unblocks a pending Read, which then returns
+// os.ErrClosed, and flushes the input buffer. A Write in progress when
+// Close starts finishes before the modes are restored. The handles are the
+// process's standard handles and stay open.
+//
+// Close is idempotent. A second Close that runs while the first is still in
+// progress waits for the first to finish, then returns nil; a Close after
+// that returns nil at once. Only the first Close reports errors. A non-nil
+// error can mean the reader is still blocked in ReadConsoleW; it returns
+// os.ErrClosed once it wakes.
 //
 // A blocked ReadConsoleW is woken by injecting an Enter key-down record;
 // the reader sees the closing flag and discards what it read. Enter is
@@ -261,12 +350,13 @@ func (c *Console) Close() error {
 	c.mu.Lock()
 	if c.closing {
 		c.mu.Unlock()
+		<-c.done
 		return nil
 	}
 	c.closing = true
 	reading := c.reading
-	restore := c.restore
 	c.mu.Unlock()
+	defer close(c.done)
 
 	var errs []error
 	if reading {
@@ -275,28 +365,36 @@ func (c *Console) Close() error {
 	if err := windows.FlushConsoleInputBuffer(c.in); err != nil {
 		errs = append(errs, fmt.Errorf("console: flush input: %w", err))
 	}
-	if restore != nil {
-		errs = append(errs, restore())
-	}
+
+	// Let a Write in flight finish under the modes it started with; every
+	// later Write sees closing and writes nothing.
+	c.wmu.Lock()
+	c.mu.Lock()
+	errs = append(errs, c.restoreLocked())
+	c.mu.Unlock()
+	c.wmu.Unlock()
 	return errors.Join(errs...)
 }
 
 // wakeAndWait injects wake records until the reader reports that it
-// returned, or closeWait passes.
+// returned, or closeWait passes. A failed injection does not end the wait:
+// the next tick injects again, and if the reader returns anyway (another
+// record woke it) the wait succeeds.
 func (c *Console) wakeAndWait() error {
 	tick := time.NewTicker(wakeEvery)
 	defer tick.Stop()
 	deadline := time.After(closeWait)
+	var injectErr error
 	for {
 		if err := c.wakeReader(); err != nil {
-			return err
+			injectErr = err
 		}
 		select {
 		case <-c.exited:
 			return nil
 		case <-tick.C:
 		case <-deadline:
-			return errors.New("console: reader did not return after close")
+			return errors.Join(errors.New("console: reader did not return after close"), injectErr)
 		}
 	}
 }
@@ -316,7 +414,11 @@ func (c *Console) wakeReader() error {
 			UnicodeChar:     '\r',
 		},
 	}
-	if err := writeConsoleInput(c.in, []inputRecord{rec}); err != nil {
+	inject := c.injectFn
+	if inject == nil {
+		inject = writeConsoleInput
+	}
+	if err := inject(c.in, []inputRecord{rec}); err != nil {
 		return fmt.Errorf("console: wake reader: %w", err)
 	}
 	return nil
