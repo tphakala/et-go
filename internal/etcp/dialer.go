@@ -41,8 +41,9 @@ var (
 	// (MISMATCHED_PROTOCOL), on the first connect or a redial.
 	ErrVersion = errors.New("etcp: protocol version mismatch")
 	// ErrIntegrity reports a packet that failed authentication or could not
-	// be parsed, or a frame above wire.MaxFrameSize: the stream is out of
-	// step or tampered with and cannot be resumed.
+	// be parsed, a frame above wire.MaxFrameSize, or a handshake message
+	// that is oversized or does not decode: the stream is out of step or
+	// tampered with and cannot be resumed.
 	ErrIntegrity = errors.New("etcp: stream integrity failure")
 	// ErrReplayExceeded reports that the peer needs packets no longer
 	// retained, is ahead of what was sent, or needs a catchup too large to
@@ -170,7 +171,8 @@ type netDialer interface {
 // connect dials one TCP link and runs the connect handshake on it (plus the
 // recover exchange for a returning client). It returns the ready connection
 // and the peer's catchup entries, which the new link delivers first. If ctx
-// ends during the handshake, the error wraps context.Cause(ctx).
+// ends during the handshake, the error wraps context.Cause(ctx). A handshake
+// message that is oversized or does not decode yields ErrIntegrity.
 func (c *Conn) connect(ctx context.Context, first bool) (net.Conn, [][]byte, error) {
 	dctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
@@ -191,6 +193,12 @@ func (c *Conn) connect(ctx context.Context, first bool) (net.Conn, [][]byte, err
 	}
 	if err != nil {
 		_ = nc.Close()
+		if errors.Is(err, wire.ErrTooLarge) || errors.Is(err, wire.ErrMalformed) {
+			// Only a broken or hostile server sends a handshake message
+			// that is oversized or does not decode; as on the stream, the
+			// session cannot continue, and redialing would meet it again.
+			err = fmt.Errorf("%w: %w", ErrIntegrity, err)
+		}
 		if ctx.Err() != nil {
 			// Ending ctx closes nc, so the handshake reports a closed
 			// connection; the cause is what the caller needs.
@@ -246,10 +254,10 @@ func (c *Conn) handshake(conn net.Conn, first bool) ([][]byte, error) {
 }
 
 // isFatal reports whether a reconnect error ends the Conn instead of
-// triggering a retry. Integrity failures never reach here: the reader ends the
-// Conn directly.
+// triggering a retry. Integrity failures on the stream never reach here (the
+// reader ends the Conn directly); ones in a handshake message do.
 func isFatal(err error) bool {
-	for _, target := range []error{ErrSessionEnded, ErrVersion, ErrReplayExceeded, ErrRejected} {
+	for _, target := range []error{ErrSessionEnded, ErrVersion, ErrReplayExceeded, ErrRejected, ErrIntegrity} {
 		if errors.Is(err, target) {
 			return true
 		}

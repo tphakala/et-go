@@ -174,8 +174,8 @@ func TestReadMessageGarbage(t *testing.T) {
 	// Length 2, then bytes that are not a valid protobuf (field 0 is illegal).
 	in := []byte{2, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x00}
 	var sh protocol.SequenceHeader
-	if err := ReadMessage(bytes.NewReader(in), &sh); err == nil {
-		t.Fatal("ReadMessage(garbage) = nil, want an unmarshal error")
+	if err := ReadMessage(bytes.NewReader(in), &sh); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("ReadMessage(garbage) = %v, want ErrMalformed", err)
 	}
 }
 

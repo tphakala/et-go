@@ -2,6 +2,7 @@ package etcp_test
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"net"
 	"testing"
@@ -195,5 +196,55 @@ func TestDefaultNetDialer(t *testing.T) {
 	}
 	if err := expectNumbered(ctx, 1, srv.Recv); err != nil {
 		t.Fatalf("server side: %v", err)
+	}
+}
+
+// A redial whose ConnectResponse is oversized or does not decode can only
+// come from a broken or hostile server; as on the stream, the Conn ends
+// with ErrIntegrity instead of redialing forever.
+func TestBadHandshakeMessageIsFatal(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  []byte
+	}{
+		{name: "length above the limit", msg: binary.LittleEndian.AppendUint64(nil, wire.MaxMessageSize+1)},
+		{name: "body that does not decode", msg: append(binary.LittleEndian.AppendUint64(nil, 3), 0xff, 0xff, 0xff)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				s := &scripted{handle: func(i int, c *rawServer) {
+					if i == 0 {
+						c.acceptFrames(1) // drop the link after the test's first packet
+						return
+					}
+					var req protocol.ConnectRequest
+					if wire.ReadMessage(c.br, &req) != nil {
+						return
+					}
+					if _, err := c.conn.Write(tt.msg); err == nil {
+						c.drain()
+					}
+				}}
+				d := etcp.Dialer{NetDialer: s}
+				conn, err := d.Dial(t.Context(), testAddr, testID, testKey)
+				if err != nil {
+					t.Fatalf("Dial: %v", err)
+				}
+				defer func() {
+					_ = conn.Close()
+					s.wg.Wait()
+				}()
+				if err := conn.WritePacket(t.Context(), numbered(0, 10)); err != nil {
+					t.Fatalf("WritePacket: %v", err)
+				}
+				if _, err := readPacket(t, conn); !errors.Is(err, etcp.ErrIntegrity) {
+					t.Fatalf("ReadPacket = %v, want ErrIntegrity", err)
+				}
+				if got := s.dials.Load(); got != 2 {
+					t.Fatalf("dials = %d, want 2: a bad handshake message must not be retried", got)
+				}
+			})
+		})
 	}
 }

@@ -34,6 +34,11 @@ const (
 // negative handshake length.
 var ErrTooLarge = errors.New("wire: length exceeds limit")
 
+// ErrMalformed reports a handshake message whose complete body does not
+// decode: the peer sent garbage, since a cut stream yields
+// io.ErrUnexpectedEOF before decoding is attempted.
+var ErrMalformed = errors.New("wire: malformed message")
+
 // ErrShortPacket reports a serialized packet without its 2-byte header.
 var ErrShortPacket = errors.New("wire: packet shorter than its 2-byte header")
 

@@ -34,7 +34,8 @@ func WriteMessage(w io.Writer, m proto.Message) error {
 // The body buffer grows as bytes arrive rather than being allocated at the
 // declared length up front. A stream that ends before the first length byte
 // yields a wrapped io.EOF; one that ends anywhere later, including right
-// after a complete length, yields a wrapped io.ErrUnexpectedEOF.
+// after a complete length, yields a wrapped io.ErrUnexpectedEOF. A complete
+// body that does not decode yields an error wrapping ErrMalformed.
 func ReadMessage(r io.Reader, m proto.Message) error {
 	var hdr [8]byte
 	if k, err := io.ReadFull(r, hdr[:]); err != nil {
@@ -49,7 +50,7 @@ func ReadMessage(r io.Reader, m proto.Message) error {
 		return fmt.Errorf("wire: read %T body: %w", m, err)
 	}
 	if err := proto.Unmarshal(body, m); err != nil {
-		return fmt.Errorf("wire: unmarshal %T: %w", m, err)
+		return fmt.Errorf("wire: unmarshal %T: %w: %w", m, ErrMalformed, err)
 	}
 	return nil
 }
