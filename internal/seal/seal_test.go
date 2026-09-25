@@ -33,8 +33,8 @@ func TestNaClVector(t *testing.T) {
 
 	s := New(&key, ClientToServer)
 	// Seal increments before use, so start one below the vector's nonce.
-	copy(s.nonce[:], nonce)
-	s.nonce[0]--
+	copy(s.st.nonce[:], nonce)
+	s.st.nonce[0]--
 
 	if got := s.Seal(nil, plaintext); !bytes.Equal(got, want) {
 		t.Fatalf("Seal = %x\nwant    %x", got, want)
@@ -108,8 +108,8 @@ func TestGolden(t *testing.T) {
 					continue
 				}
 				checked++
-				if !bytes.Equal(s.nonce[:], r.nonce) {
-					t.Errorf("op %d: nonce %x, want %x", i, s.nonce, r.nonce)
+				if !bytes.Equal(s.st.nonce[:], r.nonce) {
+					t.Errorf("op %d: nonce %x, want %x", i, s.st.nonce, r.nonce)
 				}
 				if !bytes.Equal(box, r.box) {
 					t.Errorf("op %d: box %x, want %x", i, box, r.box)
@@ -305,6 +305,78 @@ func TestStreamRedacted(t *testing.T) {
 		logger.Info("stream", slog.Any("s", s))
 		assertRedacted(t, buf.String())
 	})
+
+	// The direction is the one field the redacted form shows, so it must be
+	// the Stream's real direction rather than a constant.
+	t.Run("direction shown", func(t *testing.T) {
+		out := fmt.Sprint(New(&testKey, ServerToClient))
+		if !strings.Contains(out, "dir:1") {
+			t.Errorf("Sprint(ServerToClient stream) = %q, want it to contain dir:1", out)
+		}
+	})
+
+	// fmt cannot call methods on an unexported field and prints it by
+	// reflection, so a Stream held that way must expose nothing but a
+	// pointer. Exported fields go through Format and are covered above.
+	type holder struct {
+		name string
+		st   Stream
+		ptr  *Stream
+	}
+	h := holder{name: "h", st: *s, ptr: s}
+	for _, verb := range verbs {
+		t.Run("unexported field "+verb, func(t *testing.T) {
+			out := fmt.Sprintf(verb, h)
+			for _, f := range forbidden {
+				if strings.Contains(out, f) {
+					t.Errorf("Sprintf(%s, holder) = %q contains key material %q", verb, out, f)
+				}
+			}
+		})
+	}
+	t.Run("unexported field slog text", func(t *testing.T) {
+		var buf bytes.Buffer
+		slog.New(slog.NewTextHandler(&buf, nil)).Info("h", slog.Any("h", h))
+		for _, f := range forbidden {
+			if strings.Contains(buf.String(), f) {
+				t.Errorf("slog text of holder = %q contains key material %q", buf.String(), f)
+			}
+		}
+	})
+
+	t.Run("zero value", func(t *testing.T) {
+		var zero Stream
+		if got := fmt.Sprint(zero); got != "seal.Stream{}" {
+			t.Errorf("Sprint(zero Stream) = %q, want %q", got, "seal.Stream{}")
+		}
+		var buf bytes.Buffer
+		slog.New(slog.NewJSONHandler(&buf, nil)).Info("z", slog.Any("s", zero))
+		// slog recovers a panicking LogValue and logs "LogValue panicked".
+		if out := buf.String(); strings.Contains(out, "key") || strings.Contains(out, "panicked") {
+			t.Errorf("slog of zero Stream = %q, want no key field and no recovered panic", out)
+		}
+	})
+}
+
+// TestStreamCopySharesNonce pins that a copy of a Stream shares the
+// original's nonce counter: sealing once through each must use two
+// consecutive nonces, never the same one twice, so an opener at the start of
+// the stream opens both boxes in order.
+func TestStreamCopySharesNonce(t *testing.T) {
+	a := New(&testKey, ClientToServer)
+	b := *a
+	box1 := a.Seal(nil, []byte("same"))
+	box2 := b.Seal(nil, []byte("same"))
+	if bytes.Equal(box1, box2) {
+		t.Fatal("two seals of the same plaintext through a Stream and its copy produced the same box: the nonce was reused")
+	}
+	opener := New(&testKey, ClientToServer)
+	for i, box := range [][]byte{box1, box2} {
+		got, err := opener.Open(nil, box)
+		if err != nil || string(got) != "same" {
+			t.Fatalf("Open box %d = %q, %v; want %q, nil", i+1, got, err, "same")
+		}
+	}
 }
 
 func BenchmarkSeal(b *testing.B) {
