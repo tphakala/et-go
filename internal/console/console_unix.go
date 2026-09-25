@@ -18,10 +18,12 @@ import (
 // Console is the controlling terminal, opened as /dev/tty.
 //
 // Opening /dev/tty creates an open file description of its own, so the
-// non-blocking mode Go sets on it (which makes Read cancellable by Close and
-// SetReadDeadline) never leaks into the shell's stdin, even if et crashes.
-// Fd is never called on the file: per the os.File.Fd docs its deadline
-// methods would then stop working. All ioctls go through SyscallConn.
+// non-blocking mode Go sets on it (which is what lets Close unblock a
+// pending Read; MEASURED on Linux against a pty in the package tests, not
+// yet measured on darwin) never leaks into the shell's stdin, even if et
+// crashes. Fd is never called on the file: per the os.File.Fd docs its
+// deadline methods would then stop working. All ioctls go through
+// SyscallConn.
 type Console struct {
 	tty  *os.File
 	base *term.State // terminal state when the console was opened
@@ -100,7 +102,8 @@ func (c *Console) MakeRaw() (restore func() error, err error) {
 }
 
 // Read reads raw input bytes. A pending Read returns os.ErrClosed once Close
-// is called.
+// is called (MEASURED on Linux against a pty in the package tests, not yet
+// measured on darwin).
 func (c *Console) Read(p []byte) (int, error) { return c.tty.Read(p) }
 
 // Write writes remote output to the terminal.
@@ -127,14 +130,28 @@ func (c *Console) Size() (Size, error) {
 
 // Resizes yields the window size each time it changes, until ctx ends or
 // the loop body stops. Changes are measured against the size when Resizes
-// is called, which is not yielded itself; callers read it with Size. Range
-// over the result once.
+// is called, which is not yielded itself; callers read it with Size. A
+// change that happens before ranging starts is still caught: SIGWINCH
+// registration and the first comparison against the call-time size both
+// happen as soon as the returned sequence starts running, so no resize can
+// fall in the gap. Range over the result once.
 func (c *Console) Resizes(ctx context.Context) iter.Seq[Size] {
 	last, _ := c.Size()
 	return func(yield func(Size) bool) {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, unix.SIGWINCH)
 		defer signal.Stop(sig)
+
+		// A resize between the Resizes call and Notify registering above
+		// would otherwise be lost: SIGWINCH is ignored by default, so a
+		// signal that fires in that gap never reaches sig. Check once,
+		// right after registering, so such a change is still caught.
+		if sz, err := c.Size(); err == nil && sz != last {
+			last = sz
+			if !yield(sz) {
+				return
+			}
+		}
 
 		for {
 			select {
@@ -155,7 +172,8 @@ func (c *Console) Resizes(ctx context.Context) iter.Seq[Size] {
 }
 
 // Close restores the terminal mode if MakeRaw was called, then closes the
-// terminal, which unblocks a pending Read.
+// terminal, which unblocks a pending Read (MEASURED on Linux against a pty
+// in the package tests, not yet measured on darwin).
 func (c *Console) Close() error {
 	c.mu.Lock()
 	restore := c.restore

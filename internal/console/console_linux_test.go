@@ -170,6 +170,13 @@ func TestCloseRestoresAndUnblocksRead(t *testing.T) {
 	if _, err := c.MakeRaw(); err != nil {
 		t.Fatalf("MakeRaw: %v", err)
 	}
+	// SetReadDeadline succeeds only on a pollable fd; a non-pollable fd
+	// returns os.ErrNoDeadline. This makes the "Read was really pending"
+	// half of the test below deterministic instead of a race between the
+	// goroutine entering Read and Close running.
+	if err := c.tty.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatalf("SetReadDeadline: %v, want the tty fd to be pollable", err)
+	}
 	readErr := make(chan error, 1)
 	go func() {
 		_, err := c.Read(make([]byte, 8))
@@ -269,6 +276,52 @@ unchanged:
 			t.Fatal("Resizes never yielded the new size")
 		}
 	}
+}
+
+// TestResizesYieldsChangeBeforeRangingStarts covers the gap between the
+// Resizes call and the start of ranging over its result: SIGWINCH is only
+// registered once the returned sequence starts running, so a resize that
+// happens earlier must still be caught by the check Resizes makes right
+// after registering, not lost until the next signal.
+func TestResizesYieldsChangeBeforeRangingStarts(t *testing.T) {
+	_, slave := openPTY(t)
+	c := mustConsole(t, slave)
+	setWinsize(t, slave, &unix.Winsize{Row: 24, Col: 80})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	resizes := c.Resizes(ctx) // baseline 24x80 is taken here
+
+	// Change the size before ranging starts. No SIGWINCH is sent to this
+	// process: TIOCSWINSZ on Linux signals a pty's foreground process
+	// group, and this test process was never made that group (the pty was
+	// opened with O_NOCTTY and never became a controlling terminal), so
+	// the kernel does not deliver one here either (confirmed empirically
+	// against this behavior: signal.Notify(SIGWINCH) plus a bare
+	// TIOCSWINSZ on such a pty times out with nothing received). The only
+	// way the new size can reach the consumer below is the immediate
+	// post-Notify check inside Resizes.
+	setWinsize(t, slave, &unix.Winsize{Row: 50, Col: 120})
+
+	sizes := make(chan Size, 4)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for sz := range resizes {
+			sizes <- sz
+		}
+	}()
+
+	select {
+	case sz := <-sizes:
+		if sz != (Size{Rows: 50, Cols: 120}) {
+			t.Fatalf("Resizes yielded %+v, want 50x120", sz)
+		}
+	case <-time.After(waitTimeout):
+		t.Fatal("Resizes never yielded the size that changed before ranging started")
+	}
+	cancel()
+	<-done
 }
 
 func setWinsize(t *testing.T, f *os.File, ws *unix.Winsize) {
