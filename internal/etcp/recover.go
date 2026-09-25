@@ -99,7 +99,7 @@ func (c *Conn) recover(conn net.Conn) ([][]byte, error) {
 	}
 	rerr := <-gotAll
 	wg.Wait()
-	if rerr != nil && (err == nil || readerErrWins(err)) {
+	if rerr != nil && (err == nil || readerErrWins(err, rerr)) {
 		return nil, fmt.Errorf("etcp: read recover message: %w", rerr)
 	}
 	if err != nil {
@@ -117,14 +117,18 @@ func (c *Conn) recover(conn net.Conn) ([][]byte, error) {
 	return theirs.GetBuffer(), nil
 }
 
-// readerErrWins reports whether the recover reader's error, rather than the
-// writer's err, explains a failed exchange: when the writer merely hit the
-// conn that the reader's failure closed. The reader's error is then the
-// cause, and a bad message from the server (which connect turns into
-// ErrIntegrity) is reported as such. A writer that failed on its own, with
-// ErrReplayExceeded or an I/O error, closed the conn first, so its error
-// stands.
-func readerErrWins(err error) bool {
+// readerErrWins reports whether the recover reader's error rerr, rather than
+// the writer's err, explains a failed exchange. It does when rerr marks a
+// bad message from the server (which connect turns into ErrIntegrity): over
+// TCP the same bad peer may also reset the connection, and the writer's
+// reset error can arrive before the reader's close takes effect. It also
+// does when the writer merely hit the conn that the reader's failure
+// closed. Otherwise the writer failed on its own (an I/O error, or
+// ErrReplayExceeded, which is fatal either way) and its error stands.
+func readerErrWins(err, rerr error) bool {
+	if errors.Is(rerr, wire.ErrTooLarge) || errors.Is(rerr, wire.ErrMalformed) {
+		return true
+	}
 	return errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe)
 }
 

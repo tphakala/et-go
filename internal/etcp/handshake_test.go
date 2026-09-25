@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -199,17 +202,74 @@ func TestDefaultNetDialer(t *testing.T) {
 	}
 }
 
-// The same holds for the recover exchange's SequenceHeader and CatchupBuffer,
-// even when the server, as upstream does, has not read our messages yet, so
-// our own write is still blocked when the bad message arrives.
+// tcpStyleConn reports use of its own closed end as net.ErrClosed, as a TCP
+// conn does, instead of net.Pipe's io.ErrClosedPipe. With reset set, a failed
+// Write reports a connection reset instead, as a TCP write can when the peer
+// that sent a bad message also dropped the connection.
+type tcpStyleConn struct {
+	net.Conn
+	closed atomic.Bool
+	reset  bool
+}
+
+func (c *tcpStyleConn) Close() error {
+	c.closed.Store(true)
+	return c.Conn.Close()
+}
+
+func (c *tcpStyleConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if err != nil && c.closed.Load() {
+		err = fmt.Errorf("tcp-style read: %w", net.ErrClosed)
+	}
+	return n, err
+}
+
+func (c *tcpStyleConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	switch {
+	case err != nil && c.reset:
+		err = fmt.Errorf("tcp-style write: %w", syscall.ECONNRESET)
+	case err != nil && c.closed.Load():
+		err = fmt.Errorf("tcp-style write: %w", net.ErrClosed)
+	}
+	return n, err
+}
+
+type tcpStyleDialer struct {
+	inner *scripted
+	reset bool
+}
+
+func (d tcpStyleDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	c, err := d.inner.DialContext(ctx, network, address)
+	if err != nil {
+		return nil, err
+	}
+	return &tcpStyleConn{Conn: c, reset: d.reset}, nil
+}
+
+// As TestBadHandshakeMessageIsFatal below shows for the ConnectResponse, a
+// bad SequenceHeader or CatchupBuffer in the recover exchange ends the Conn,
+// even when our own write is still blocked because the server has not read
+// it: in these rows the server never reads, so the stuck write is our
+// SequenceHeader (upstream reads it before writing its catchup,
+// src/base/Connection.cpp:116-131 at et-v7.0.0, but the reader must not
+// depend on that).
 func TestBadRecoverMessageIsFatal(t *testing.T) {
 	bad := append(binary.LittleEndian.AppendUint64(nil, 3), 0xff, 0xff, 0xff) // does not decode
+	emptySeq := binary.LittleEndian.AppendUint64(nil, 0)
 	tests := []struct {
 		name string
 		good [][]byte // valid messages sent before the bad one
+		tcp  bool     // report a local close as net.ErrClosed, as a TCP conn does
+		rst  bool     // report our failed write as a connection reset instead
 	}{
 		{name: "sequence header"},
-		{name: "catchup buffer", good: [][]byte{binary.LittleEndian.AppendUint64(nil, 0)}}, // an empty SequenceHeader
+		{name: "catchup buffer", good: [][]byte{emptySeq}},
+		{name: "sequence header, TCP-style close", tcp: true},
+		{name: "catchup buffer, TCP-style close", good: [][]byte{emptySeq}, tcp: true},
+		{name: "catchup buffer, write reset", good: [][]byte{emptySeq}, tcp: true, rst: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -231,6 +291,9 @@ func TestBadRecoverMessageIsFatal(t *testing.T) {
 					<-quit // never read the client's messages
 				}}
 				d := etcp.Dialer{NetDialer: s}
+				if tt.tcp {
+					d.NetDialer = tcpStyleDialer{inner: s, reset: tt.rst}
+				}
 				conn, err := d.Dial(t.Context(), testAddr, testID, testKey)
 				if err != nil {
 					t.Fatalf("Dial: %v", err)
@@ -250,10 +313,10 @@ func TestBadRecoverMessageIsFatal(t *testing.T) {
 				if got := s.dials.Load(); got != 2 {
 					t.Fatalf("dials = %d, want 2: a bad recover message must not be retried", got)
 				}
-				// The reader's failure unblocks our stuck write at once, not
-				// after the 30 s handshake idle timeout.
-				if elapsed := time.Since(start); elapsed >= 30*time.Second {
-					t.Fatalf("recover failed after %v, want before the 30s idle timeout", elapsed)
+				// The reader's failure unblocks our stuck write at once (no
+				// fake time passes), not after the handshake idle timeout.
+				if elapsed := time.Since(start); elapsed >= time.Second {
+					t.Fatalf("recover failed after %v, want at once, not after the idle timeout", elapsed)
 				}
 			})
 		})
