@@ -35,9 +35,14 @@ go test ./... -race
 golangci-lint run                  # uses .golangci.yaml; CI pins the version in .github/workflows/ci.yml
 GOOS=windows golangci-lint run     # platform code is split by build tags; lint both sides
 go build -tags ruleguard ./rules/  # a broken rule otherwise compiles clean and silently disables ruleguard
+GOOS=js GOARCH=wasm go vet $(go list ./... | grep -v /cmd/et)  # also GOOS=wasip1; see below
 ```
 
 The client must stay pure Go: every target builds with `CGO_ENABLED=0`.
+
+Every package except `cmd/et` must also build for `js/wasm` and `wasip1/wasm` (the CI `wasm` job), so the
+protocol stack stays reusable by a browser or WASI client. Host-specific code (terminal, ssh) goes behind
+build tags; a package that cannot build for wasm at all is added to that job's exclude list with a reason.
 
 ## Conventions
 

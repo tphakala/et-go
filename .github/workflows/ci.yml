@@ -78,6 +78,31 @@ jobs:
         run: |
           GOOS="${MATRIX_TARGET%/*}" GOARCH="${MATRIX_TARGET#*/}" go build ./...
           GOOS="${MATRIX_TARGET%/*}" GOARCH="${MATRIX_TARGET#*/}" go vet ./...
+  wasm:
+    name: WebAssembly (${{ matrix.goos }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [js, wasip1]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # Keep the protocol stack portable to WebAssembly so a browser or WASI
+      # client can reuse it. cmd/et is excluded: it wires the host terminal and
+      # the system ssh, which neither wasm target has. Any other package that
+      # must depend on the host goes on the exclude list with a reason.
+      # vet also type-checks the test files.
+      - name: Build and vet ${{ matrix.goos }}/wasm
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: wasm
+        run: |
+          mapfile -t pkgs < <(go list ./... | grep -v -x -e 'github.com/tphakala/et-go/cmd/et')
+          go build "${pkgs[@]}"
+          go vet "${pkgs[@]}"
   lint:
     name: Lint
     runs-on: ubuntu-latest
