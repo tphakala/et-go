@@ -114,29 +114,32 @@ func Run(ctx context.Context, cfg Config) (Credentials, error) {
 	}
 	// The remote side may echo the command it ran (shell tracing, a
 	// diagnostic) before any marker, and against a server that does not
-	// regenerate, the generated passkey is the session passkey, so it is
-	// redacted before any output can be quoted.
-	return Credentials{}, describeFailure(exitErr, parseErr, redactSecret(out.Bytes(), passkey))
+	// regenerate, the generated passkey is the session passkey. Output that
+	// holds any piece of it cannot be scrubbed reliably (it may be split or
+	// wrapped), so it is not quoted at all.
+	shown := out.Bytes()
+	if containsPiece(shown, passkey) {
+		shown = []byte(withheldOutput)
+	}
+	return Credentials{}, describeFailure(exitErr, parseErr, shown)
 }
 
-// minFragment is the shortest piece of a secret redactSecret removes.
-const minFragment = 8
+const (
+	// minPiece is the shortest piece of the passkey containsPiece looks for.
+	// Only output wrapped at fewer columns than this could slip past it.
+	minPiece = 4
+	// withheldOutput replaces an excerpt that would quote passkey material.
+	withheldOutput = "[withheld: the output contains part of the generated session key]"
+)
 
-// redactSecret replaces secret in out, and every minFragment-byte piece of it,
-// so a copy split across lines or cut short is removed too. Only pieces
-// shorter than minFragment bytes can survive (the tail of a longer fragment,
-// or a whole short one), far too little to recover a 32-character passkey.
-func redactSecret(out []byte, secret string) []byte {
-	if secret == "" {
-		// bytes.ReplaceAll with an empty old value would insert the
-		// replacement between every byte.
-		return out
+// containsPiece reports whether out holds any minPiece-byte piece of secret.
+func containsPiece(out []byte, secret string) bool {
+	for i := 0; i+minPiece <= len(secret); i++ {
+		if bytes.Contains(out, []byte(secret[i:i+minPiece])) {
+			return true
+		}
 	}
-	out = bytes.ReplaceAll(out, []byte(secret), []byte(redacted))
-	for i := 0; i+minFragment <= len(secret); i++ {
-		out = bytes.ReplaceAll(out, []byte(secret[i:i+minFragment]), []byte(redacted))
-	}
-	return out
+	return false
 }
 
 // describeFailure builds the single error the user sees when ssh finished

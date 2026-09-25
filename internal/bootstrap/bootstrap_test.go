@@ -315,40 +315,46 @@ func TestRunFailureRedactsPlaceholder(t *testing.T) {
 	if len(sent) != 3 {
 		t.Fatalf("remote command %q does not carry a placeholder id and passkey", readArgv(t, argvPath)[2])
 	}
-	if strings.Contains(err.Error(), sent[2]) {
-		t.Fatalf("error quotes the generated passkey: %v", err)
+	if containsPiece([]byte(err.Error()), sent[2]) {
+		t.Fatalf("error quotes passkey material: %v", err)
 	}
-	// The rest of the echoed line stays, so the excerpt still helps.
-	if !strings.Contains(err.Error(), redacted) || !strings.Contains(err.Error(), "etterminal --verbose=0") {
-		t.Fatalf("error %q lost the echoed command around the redaction", err)
+	// The output is withheld as a whole, but the status is still reported.
+	if !strings.Contains(err.Error(), withheldOutput) || !strings.Contains(err.Error(), "status 1") {
+		t.Fatalf("error %q does not say the output was withheld and give the status", err)
 	}
 }
 
-func TestRedactSecret(t *testing.T) {
-	// A secret with no repeated 8-byte window, so each expected value follows
-	// from the window rule alone; the values are written out so a redaction
-	// that also eats surrounding text fails.
+func TestContainsPiece(t *testing.T) {
 	const secret = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+	// wrap splits s into lines of n bytes, as a narrow diagnostic might.
+	wrap := func(s string, n int) string {
+		var b strings.Builder
+		for len(s) > n {
+			b.WriteString(s[:n] + "\n")
+			s = s[n:]
+		}
+		return b.String() + s
+	}
 	tests := []struct {
-		name, out, want string
+		name string
+		out  string
+		want bool
 	}{
-		{"whole", "x " + secret + " y", "x REDACTED y"},
-		{"twice", secret + secret, "REDACTEDREDACTED"},
-		{"split across lines", "x " + secret[:20] + "\n" + secret[20:] + " y", "x REDACTEDREDACTEDQRST\nREDACTED4567 y"},
-		{"cut short", "x " + secret[:10], "x REDACTEDIJ"},
-		{"unaligned piece", "x " + secret[3:15] + " y", "x REDACTEDLMNO y"},
-		{"short piece survives", "x " + secret[:5] + " y", "x ABCDE y"},
-		{"unrelated", "Welcome to the server", "Welcome to the server"},
+		{"whole", "x " + secret + " y", true},
+		{"wrapped at 7", wrap(secret, 7), true},
+		{"wrapped at minPiece", wrap(secret, minPiece), true},
+		{"unaligned piece", "x " + secret[13:17] + " y", true},
+		{"last piece", "x " + secret[len(secret)-minPiece:], true},
+		{"shorter than minPiece", "x " + secret[:minPiece-1] + " y", false},
+		{"unrelated", "Welcome to the server\nLast login: Thu", false},
+		{"empty", "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := string(redactSecret([]byte(tt.out), secret)); got != tt.want {
-				t.Fatalf("redactSecret(%q) = %q, want %q", tt.out, got, tt.want)
+			if got := containsPiece([]byte(tt.out), secret); got != tt.want {
+				t.Fatalf("containsPiece(%q) = %v, want %v", tt.out, got, tt.want)
 			}
 		})
-	}
-	if got := string(redactSecret([]byte("abc"), "")); got != "abc" {
-		t.Fatalf("redactSecret with an empty secret = %q, want the output unchanged", got)
 	}
 }
 
