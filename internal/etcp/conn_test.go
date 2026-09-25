@@ -446,13 +446,33 @@ func TestDialErrorsHidePasskey(t *testing.T) {
 	if _, err := d.Dial(t.Context(), testAddr, testID, short); err == nil || strings.Contains(err.Error(), short) {
 		t.Fatalf("Dial with a 31-byte passkey = %v; want an error that does not quote it", err)
 	}
-	synctest.Test(t, func(t *testing.T) {
-		s := &scripted{handle: func(_ int, c *rawServer) { _ = c.respond(protocol.ConnectStatus_INVALID_KEY) }}
-		d := etcp.Dialer{NetDialer: s}
-		_, err := d.Dial(t.Context(), testAddr, testID, testKey)
-		if err == nil || strings.Contains(err.Error(), testKey) {
-			t.Fatalf("rejected Dial = %v; want an error that does not quote the passkey", err)
-		}
-		s.wg.Wait()
-	})
+	// The server's error text is peer-controlled: a server that knows the
+	// passkey could echo it, or send terminal escape sequences, so none of
+	// it may reach the error.
+	peerText := "rejected " + testKey + " \x1b]0;pwned\x07"
+	for _, status := range []protocol.ConnectStatus{
+		protocol.ConnectStatus_INVALID_KEY,
+		protocol.ConnectStatus_MISMATCHED_PROTOCOL,
+	} {
+		t.Run(status.String(), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				s := &scripted{handle: func(_ int, c *rawServer) {
+					var req protocol.ConnectRequest
+					if wire.ReadMessage(c.br, &req) != nil {
+						return
+					}
+					resp := &protocol.ConnectResponse{}
+					resp.SetStatus(status)
+					resp.SetError(peerText)
+					_ = wire.WriteMessage(c.conn, resp)
+				}}
+				d := etcp.Dialer{NetDialer: s}
+				_, err := d.Dial(t.Context(), testAddr, testID, testKey)
+				if err == nil || strings.Contains(err.Error(), testKey) || strings.Contains(err.Error(), "\x1b") {
+					t.Fatalf("rejected Dial = %q; want an error without the server's text", err)
+				}
+				s.wg.Wait()
+			})
+		})
+	}
 }

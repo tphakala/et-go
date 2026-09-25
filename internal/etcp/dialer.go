@@ -267,13 +267,17 @@ func (c *Conn) handshake(conn net.Conn, first bool) ([][]byte, error) {
 		// Running it here with empty state (nothing sent, nothing received)
 		// matches what the server expects.
 		return c.recover(conn)
+	// The response's error text is never quoted: it is peer-controlled, so
+	// it could carry the passkey or terminal escape sequences, and upstream
+	// only puts fixed sentences there (src/base/ServerConnection.cpp:55-59,
+	// 93 at et-v7.0.0).
 	case protocol.ConnectStatus_INVALID_KEY:
 		if first {
-			return nil, fmt.Errorf("%w: %s", ErrRejected, resp.GetError())
+			return nil, fmt.Errorf("%w: server does not know this client", ErrRejected)
 		}
 		return nil, ErrSessionEnded
 	case protocol.ConnectStatus_MISMATCHED_PROTOCOL:
-		return nil, fmt.Errorf("%w: %s", ErrVersion, resp.GetError())
+		return nil, fmt.Errorf("%w: server does not speak protocol version %d", ErrVersion, protocol.Version)
 	default:
 		return nil, fmt.Errorf("%w: unexpected status %v", ErrRejected, resp.GetStatus())
 	}
