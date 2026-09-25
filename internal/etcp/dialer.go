@@ -19,7 +19,8 @@ import (
 )
 
 const (
-	defaultReplayLimit = 64 << 20 // upstream MAX_BACKUP_BYTES (src/base/BackedWriter.hpp:32)
+	defaultKeepAlive   = 5 * time.Second // upstream's maximum (src/base/Headers.hpp:179)
+	defaultReplayLimit = 64 << 20        // upstream MAX_BACKUP_BYTES (src/base/BackedWriter.hpp:32)
 	dialTimeout        = 10 * time.Second
 )
 
@@ -62,10 +63,14 @@ type Dialer struct {
 // RETURNING_CLIENT answer (upstream allows it when a first attempt died after
 // registering, src/base/ClientConnection.cpp:36-39) runs the recover exchange
 // with empty state. INVALID_KEY yields ErrRejected and MISMATCHED_PROTOCOL
-// yields ErrVersion.
+// yields ErrVersion. A passkey that is not 32 bytes, or a Probe payload too
+// large for one sealed frame, is refused before dialing.
 func (d *Dialer) Dial(ctx context.Context, addr, id, passkey string) (*Conn, error) {
 	if len(passkey) != 32 {
 		return nil, fmt.Errorf("etcp: passkey must be 32 bytes, got %d", len(passkey))
+	}
+	if len(d.Probe.Payload) > maxPayload {
+		return nil, fmt.Errorf("etcp: probe payload of %d bytes: %w", len(d.Probe.Payload), wire.ErrTooLarge)
 	}
 	c := d.newConn(addr, id, passkey)
 	nc, catchup, err := c.connect(ctx, true)
@@ -99,6 +104,8 @@ func (d *Dialer) newConn(addr, id, passkey string) *Conn {
 		netDialer: nd,
 		addr:      addr,
 		id:        id,
+		keepAlive: cmp.Or(d.KeepAlive, defaultKeepAlive),
+		probe:     d.Probe,
 		logger:    logger,
 		ctx:       ctx,
 		cancel:    cancel,

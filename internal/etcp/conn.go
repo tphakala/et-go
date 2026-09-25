@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/tphakala/et-go/internal/protocol"
 	"github.com/tphakala/et-go/internal/seal"
@@ -27,6 +28,8 @@ type Conn struct {
 	netDialer netDialer
 	addr      string
 	id        string
+	keepAlive time.Duration
+	probe     protocol.Packet
 	limit     int
 	logger    *slog.Logger
 
@@ -96,6 +99,14 @@ func (c *Conn) Close() error {
 	c.cancel(errClosed)
 	c.wg.Wait()
 	return nil
+}
+
+// enqueue queues p regardless of the backlog limit; used for liveness probes.
+func (c *Conn) enqueue(p protocol.Packet) {
+	c.mu.Lock()
+	c.enqueueLocked(p)
+	c.mu.Unlock()
+	signal(c.wake)
 }
 
 // enqueueLocked seals p exactly once, so nonce order equals sequence order and
