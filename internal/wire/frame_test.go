@@ -80,9 +80,14 @@ func TestWriteFrameLimit(t *testing.T) {
 	}
 }
 
-// TestReadFrameTruncated pins which cut yields which error. etcp treats
-// io.EOF as the peer closing between frames and io.ErrUnexpectedEOF as a
-// broken link, so a cut right after a complete length must not look clean.
+// TestReadFrameTruncated pins which cut yields which error: io.EOF means the
+// link closed cleanly between frames, and io.ErrUnexpectedEOF means it was
+// cut mid-frame. The distinction is for diagnostics and logging only; both
+// are link failures to etcp, which reconnects on any read error. A session
+// end is signalled only by the server, as INVALID_KEY on redial (upstream
+// turns a 0-byte header read into EPIPE, BackedReader.cpp:48-53 at
+// et-v7.0.0: "the server needs to explicitly tell the client that the
+// session is over").
 func TestReadFrameTruncated(t *testing.T) {
 	tests := []struct {
 		name string

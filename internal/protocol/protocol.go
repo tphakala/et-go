@@ -8,7 +8,11 @@ package protocol
 type Header uint8
 
 // Packet types used by the client. The values are fixed by upstream; a test
-// checks each one against the generated enums.
+// checks each one against the generated enums. HeaderTerminalClose (11) and
+// HeaderTerminalExitStatus (12) exist only in upstream master (the copied
+// protos, commit 6f53869), not in et-v7.0.0: a 7.0.0 server never sends them
+// (verified: et-v7.0.0's proto/ has no TERMINAL_CLOSE or
+// TERMINAL_EXIT_STATUS).
 const (
 	HeaderKeepAlive          Header = 0
 	HeaderTerminalBuffer     Header = 1

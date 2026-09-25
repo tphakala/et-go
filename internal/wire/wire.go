@@ -3,12 +3,13 @@
 //
 // Handshake messages (ConnectRequest, SequenceHeader, CatchupBuffer and so on)
 // are an 8-byte length followed by the serialized protobuf. Upstream writes the
-// length in host byte order (src/base/SocketHandler.hpp at et-v7.0.0); every
-// platform upstream builds for is little-endian, so this package uses little
-// endian explicitly.
+// length in host byte order (src/base/SocketHandler.hpp at et-v7.0.0). This
+// package assumes a little-endian server, which covers x86-64 and arm64; a
+// big-endian etserver would not interoperate with any little-endian client
+// either, so the assumption is not a compatibility risk in practice.
 //
 // Stream frames on an established connection are a 4-byte big-endian length
-// (upstream htonl in BackedWriter.cpp:51) followed by one serialized packet:
+// (upstream htonl in BackedWriter.cpp:49) followed by one serialized packet:
 // an encrypted flag byte, a header byte, then the payload.
 package wire
 
@@ -21,8 +22,9 @@ import (
 const (
 	// MaxMessageSize is upstream's bound for handshake messages.
 	MaxMessageSize = 128 << 20
-	// MaxFrameSize bounds stream frames. Upstream frames carry terminal
-	// buffers of a few KiB; the bound keeps a broken or hostile peer from
+	// MaxFrameSize bounds stream frames. Upstream reads the pty in chunks of
+	// at most 16 KiB (src/terminal/TerminalServer.cpp:6, BUF_SIZE), so this
+	// bound leaves wide headroom while keeping a broken or hostile peer from
 	// forcing a large allocation.
 	MaxFrameSize = 16 << 20
 )

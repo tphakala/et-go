@@ -31,9 +31,9 @@ func TestMessageRoundTrip(t *testing.T) {
 	}
 }
 
-// TestMessageLengthIsLittleEndian pins the byte order upstream produces on
-// every platform it builds for: the 8-byte length comes first, least
-// significant byte first.
+// TestMessageLengthIsLittleEndian pins this package's assumption that the
+// server is little-endian (see the wire package doc): the 8-byte length
+// comes first, least significant byte first.
 func TestMessageLengthIsLittleEndian(t *testing.T) {
 	sh := &protocol.SequenceHeader{}
 	sh.SetSequenceNumber(300)
