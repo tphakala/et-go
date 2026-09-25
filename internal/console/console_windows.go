@@ -323,8 +323,9 @@ func (c *Console) Size() (Size, error) {
 // the loop body stops. Changes are measured against the size when Resizes
 // is called, which is not yielded itself; callers read it with Size. The
 // window is polled every 200 ms: window resize events are always filtered
-// by ReadConsole (Microsoft docs, SetConsoleMode remarks). Range over the
-// result once.
+// by ReadConsole (Microsoft docs, SetConsoleMode remarks). Nothing is
+// yielded once ctx has ended, even a change made before it ended. Range
+// over the result once.
 func (c *Console) Resizes(ctx context.Context) iter.Seq[Size] {
 	last, _ := c.Size()
 	return func(yield func(Size) bool) {
@@ -341,7 +342,9 @@ func (c *Console) Resizes(ctx context.Context) iter.Seq[Size] {
 				continue
 			}
 			last = sz
-			if !yield(sz) {
+			// select picks at random when a tick and the cancellation are
+			// both ready, so check ctx again before yielding.
+			if ctx.Err() != nil || !yield(sz) {
 				return
 			}
 		}

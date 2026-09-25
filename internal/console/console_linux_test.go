@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -52,6 +53,39 @@ func TestOpenRejectsNonTerminal(t *testing.T) {
 				t.Fatalf("open error = %v, want ErrNotTerminal", err)
 			}
 		})
+	}
+}
+
+// openThroughPath builds the Console the way Open does, reopening the
+// terminal by path. open does not pass O_NOCTTY, so a session leader
+// without a controlling terminal would acquire the test pty as one; the
+// helper skips in that case rather than change the process's terminal.
+func openThroughPath(t *testing.T, slave *os.File) *Console {
+	t.Helper()
+	if sid, err := unix.Getsid(0); err == nil && sid == os.Getpid() {
+		t.Skip("the test process is a session leader; opening the pty without O_NOCTTY could make it the controlling terminal")
+	}
+	c, err := open(slave.Name(), slave, slave)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	return c
+}
+
+// TestOpenRejectsNonTerminalTTYPath covers a tty path that opens but is not
+// a terminal: open must report ErrNotTerminal, not a bare ioctl error.
+func TestOpenRejectsNonTerminalTTYPath(t *testing.T) {
+	_, slave := openPTY(t)
+	regular := filepath.Join(t.TempDir(), "not-a-tty")
+	if err := os.WriteFile(regular, nil, 0o600); err != nil {
+		t.Fatalf("create regular file: %v", err)
+	}
+	c, err := open(regular, slave, slave)
+	if !errors.Is(err, ErrNotTerminal) {
+		if c != nil {
+			_ = c.Close()
+		}
+		t.Fatalf("open(regular file) error = %v, want ErrNotTerminal", err)
 	}
 }
 
@@ -438,14 +472,13 @@ func TestCloseRestoresAndUnblocksRead(t *testing.T) {
 	t.Cleanup(func() { _ = probe.Close() })
 	before := termios(t, probe)
 
-	c := mustConsole(t, slave)
+	c := openThroughPath(t, slave)
 	if _, err := c.MakeRaw(); err != nil {
 		t.Fatalf("MakeRaw: %v", err)
 	}
-	// SetReadDeadline succeeds only on a pollable fd; a non-pollable fd
-	// returns os.ErrNoDeadline. This makes the "Read was really pending"
-	// half of the test below deterministic instead of a race between the
-	// goroutine entering Read and Close running.
+	// SetReadDeadline succeeds only on a pollable fd (a non-pollable one
+	// returns os.ErrNoDeadline). A pollable fd is what lets Close unblock a
+	// pending Read: the Read parks in the poller, which Close wakes.
 	if err := c.tty.SetReadDeadline(time.Time{}); err != nil {
 		t.Fatalf("SetReadDeadline: %v, want the tty fd to be pollable", err)
 	}
@@ -538,7 +571,7 @@ unchanged:
 				t.Fatalf("Resizes yielded %+v, want 50x120", sz)
 			}
 			cancel()
-			<-done
+			waitDone(t, done, "Resizes after cancel")
 			if len(sizes) != 0 {
 				t.Fatalf("the new size was yielded more than once: %+v", <-sizes)
 			}
@@ -593,7 +626,134 @@ func TestResizesYieldsChangeBeforeRangingStarts(t *testing.T) {
 		t.Fatal("Resizes never yielded the size that changed before ranging started")
 	}
 	cancel()
-	<-done
+	waitDone(t, done, "Resizes after cancel")
+}
+
+// waitDone waits, bounded, for a consumer goroutine to close done.
+func waitDone(t *testing.T, done <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(waitTimeout):
+		t.Fatalf("%s: the range over Resizes never finished", what)
+	}
+}
+
+// TestResizesStopsAfterCancel checks that nothing is yielded once ctx has
+// ended, even a change made before it ended: here the size changes and ctx
+// is cancelled before ranging starts, so the check Resizes makes right
+// after registering for SIGWINCH sees a change it must not yield.
+func TestResizesStopsAfterCancel(t *testing.T) {
+	_, slave := openPTY(t)
+	c := mustConsole(t, slave)
+	setWinsize(t, slave, &unix.Winsize{Row: 24, Col: 80})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	resizes := c.Resizes(ctx) // baseline 24x80 is taken here
+	setWinsize(t, slave, &unix.Winsize{Row: 50, Col: 120})
+	cancel()
+
+	sizes := make(chan Size, 4)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for sz := range resizes {
+			sizes <- sz
+		}
+	}()
+	waitDone(t, done, "cancelled Resizes")
+	if len(sizes) != 0 {
+		t.Fatalf("Resizes yielded %+v after its context ended", <-sizes)
+	}
+}
+
+// TestResizesStopsWhenConsumerBreaks checks that breaking out of the range
+// ends it while ctx is still live, at both yield sites: the check right
+// after SIGWINCH registration (a change made before ranging starts) and
+// the signal loop (a change signalled while ranging).
+func TestResizesStopsWhenConsumerBreaks(t *testing.T) {
+	winch := func(t *testing.T) {
+		t.Helper()
+		if err := unix.Kill(os.Getpid(), unix.SIGWINCH); err != nil {
+			t.Fatalf("kill: %v", err)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		// inLoop changes the size only after ranging has run for a while,
+		// so the signal loop yields it rather than the post-registration
+		// check.
+		inLoop bool
+	}{
+		{name: "post_registration_check"},
+		{name: "signal_loop", inLoop: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, slave := openPTY(t)
+			c := mustConsole(t, slave)
+			setWinsize(t, slave, &unix.Winsize{Row: 24, Col: 80})
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel() // ctx stays live until the test has checked
+			resizes := c.Resizes(ctx)
+			if !tc.inLoop {
+				setWinsize(t, slave, &unix.Winsize{Row: 50, Col: 120})
+			}
+
+			got := make(chan Size, 1)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				for sz := range resizes {
+					got <- sz
+					break
+				}
+			}()
+
+			if tc.inLoop {
+				// Signal an unchanged size for 300 ms so the post-registration
+				// check has certainly run and found nothing, as in
+				// TestResizesYieldsChangesOnly, then change it.
+				tick := time.NewTicker(20 * time.Millisecond)
+				defer tick.Stop()
+				quiet := time.After(300 * time.Millisecond)
+			settle:
+				for {
+					winch(t)
+					select {
+					case sz := <-got:
+						t.Fatalf("an unchanged size was yielded: %+v", sz)
+					case <-tick.C:
+					case <-quiet:
+						break settle
+					}
+				}
+				setWinsize(t, slave, &unix.Winsize{Row: 50, Col: 120})
+				deadline := time.After(waitTimeout)
+			signal:
+				for {
+					winch(t)
+					select {
+					case sz := <-got:
+						got <- sz // hand it on to the check below
+						break signal
+					case <-tick.C:
+					case <-deadline:
+						t.Fatal("Resizes never yielded the new size")
+					}
+				}
+			}
+
+			select {
+			case sz := <-got:
+				if sz != (Size{Rows: 50, Cols: 120}) {
+					t.Fatalf("Resizes yielded %+v, want 50x120", sz)
+				}
+			case <-time.After(waitTimeout):
+				t.Fatal("Resizes never yielded the new size")
+			}
+			waitDone(t, done, "break with ctx live")
+		})
+	}
 }
 
 func setWinsize(t *testing.T, f *os.File, ws *unix.Winsize) {

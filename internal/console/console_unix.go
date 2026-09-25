@@ -191,7 +191,8 @@ func (c *Console) Size() (Size, error) {
 // change that happens before ranging starts is still caught: SIGWINCH
 // registration and the first comparison against the call-time size both
 // happen as soon as the returned sequence starts running, so no resize can
-// fall in the gap. Range over the result once.
+// fall in the gap. Nothing is yielded once ctx has ended, even a change
+// made before it ended. Range over the result once.
 func (c *Console) Resizes(ctx context.Context) iter.Seq[Size] {
 	last, _ := c.Size()
 	return func(yield func(Size) bool) {
@@ -205,7 +206,7 @@ func (c *Console) Resizes(ctx context.Context) iter.Seq[Size] {
 		// right after registering, so such a change is still caught.
 		if sz, err := c.Size(); err == nil && sz != last {
 			last = sz
-			if !yield(sz) {
+			if ctx.Err() != nil || !yield(sz) {
 				return
 			}
 		}
@@ -221,7 +222,9 @@ func (c *Console) Resizes(ctx context.Context) iter.Seq[Size] {
 				continue
 			}
 			last = sz
-			if !yield(sz) {
+			// select picks at random when a signal and the cancellation
+			// are both ready, so check ctx again before yielding.
+			if ctx.Err() != nil || !yield(sz) {
 				return
 			}
 		}
