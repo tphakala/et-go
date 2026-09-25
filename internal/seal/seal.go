@@ -11,6 +11,8 @@ package seal
 
 import (
 	"errors"
+	"fmt"
+	"log/slog"
 
 	"golang.org/x/crypto/nacl/secretbox"
 )
@@ -72,4 +74,31 @@ func (s *Stream) increment() {
 			return
 		}
 	}
+}
+
+// Format implements fmt.Formatter so every verb prints a fixed, redacted
+// form instead of walking the struct fields. Without this, %v or %+v on a
+// *Stream (or a Stream value) prints the raw 32-byte session passkey, which
+// the binding rule forbids ever appearing in fmt output. The direction byte
+// is safe to show; the nonce counter and the key never are, so both are
+// left out. The receiver is a value, not a pointer: Stream has no mutex, so
+// copying it is not a vet error, and a value receiver is what makes both
+// fmt.Sprint(s) and fmt.Sprint(*s) redacted. A pointer-only receiver would
+// leave the value form outside the method set, and fmt would fall back to
+// printing the struct's fields, key bytes included.
+func (s Stream) Format(f fmt.State, _ rune) {
+	dir := s.nonce[len(s.nonce)-1]
+	_, _ = fmt.Fprintf(f, "seal.Stream{dir:%d key:REDACTED}", dir)
+}
+
+// LogValue implements slog.LogValuer for the same reason Format exists: an
+// unredacted slog.Any("s", s) would serialize the key bytes into every log
+// handler (text, JSON, or otherwise). The value receiver keeps both
+// slog.Any("s", s) and slog.Any("s", *s) redacted, matching Format.
+func (s Stream) LogValue() slog.Value {
+	dir := s.nonce[len(s.nonce)-1]
+	return slog.GroupValue(
+		slog.Int("dir", int(dir)),
+		slog.String("key", "REDACTED"),
+	)
 }

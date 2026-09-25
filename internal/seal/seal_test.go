@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -200,6 +201,63 @@ func TestOpenAppendsToDst(t *testing.T) {
 	if string(out) != "hdrpayload" {
 		t.Fatalf("Open(prefix) = %q, want %q", out, "hdrpayload")
 	}
+}
+
+// TestStreamRedacted checks that no rendering of a Stream, by fmt verb or by
+// slog, ever contains the key bytes: not as the decimal list fmt prints for
+// a byte array, not as hex, and not as the key's own ASCII text. The
+// rendering must instead say REDACTED. This covers both a *Stream and a
+// dereferenced Stream value, since Format and LogValue must redact both.
+func TestStreamRedacted(t *testing.T) {
+	s := New(&testKey, ClientToServer)
+
+	// testKey's first three bytes are '0', '1', '2': decimal 48 49 50, hex
+	// 303132. Any of these appearing means the raw key leaked.
+	forbidden := []string{
+		"48 49 50",   // fmt's decimal rendering of a [32]byte array
+		"303132",     // hex rendering of the same bytes
+		"0123456789", // the key's own ASCII text
+	}
+	assertRedacted := func(t *testing.T, out string) {
+		t.Helper()
+		if !strings.Contains(out, "REDACTED") {
+			t.Errorf("output %q does not contain REDACTED", out)
+		}
+		for _, f := range forbidden {
+			if strings.Contains(out, f) {
+				t.Errorf("output %q contains key material %q", out, f)
+			}
+		}
+	}
+
+	verbs := []string{"%v", "%+v", "%#v", "%s", "%x", "%X", "%d", "%q"}
+	for _, verb := range verbs {
+		t.Run(verb, func(t *testing.T) {
+			assertRedacted(t, fmt.Sprintf(verb, s))
+			assertRedacted(t, fmt.Sprintf(verb, *s))
+		})
+	}
+
+	t.Run("slog text", func(t *testing.T) {
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&buf, nil))
+		logger.Info("stream", slog.Any("s", s))
+		assertRedacted(t, buf.String())
+	})
+
+	t.Run("slog text value", func(t *testing.T) {
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&buf, nil))
+		logger.Info("stream", slog.Any("s", *s))
+		assertRedacted(t, buf.String())
+	})
+
+	t.Run("slog json", func(t *testing.T) {
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&buf, nil))
+		logger.Info("stream", slog.Any("s", s))
+		assertRedacted(t, buf.String())
+	})
 }
 
 func BenchmarkSeal(b *testing.B) {
