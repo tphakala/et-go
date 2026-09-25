@@ -50,7 +50,7 @@ et [flags] [user@]host[:port]
 
 To leave without ending the remote shell, press Enter, then `~` and `.` (on Windows, Ctrl+Break also works once the session is running). The remote shell keeps running on the server until it exits, or until etserver closes disconnected sessions if it is configured to (`disconnect_timeout`, off by default); `et` cannot reattach to it. Type `~~` to send a literal `~` at the start of a line.
 
-Exit status: the remote shell's exit status when the server reports it (255 if it is outside 0-255), 0 when the shell exits without reporting one or you detach, 2 for command-line mistakes, 255 for any other error, including an interrupt before the session starts. Upstream `et` exits 0 for interactive sessions whatever the shell's status.
+Exit status: the remote shell's exit status when the server reports it (255 if it is outside 0-255), 0 when the shell exits without reporting one or you detach, 2 for command-line mistakes, 255 for any other error, including an interrupt before the session starts. Upstream `et` exits 0 for interactive sessions whatever the shell's status (`src/terminal/TerminalClient.cpp`, lines 201 and 714-718 on upstream master).
 
 Logs are off by default. `-v` writes a debug log to `%LOCALAPPDATA%\et-go\et.log` on Windows and `$XDG_STATE_HOME/et-go/et.log` (default `~/.local/state/et-go/et.log`) elsewhere; `--log-file` picks the path. The session passkey is never logged.
 
