@@ -8,16 +8,12 @@ import (
 )
 
 // resolveTimeout bounds the local "ssh -G" query.
-//
-//nolint:unused // consumed by Task 6, which wires resolveHost into run.
 const resolveTimeout = 5 * time.Second
 
 // resolveHost returns the host name OpenSSH would connect to for this
 // destination, so an ssh_config alias ("Host box / HostName 10.0.0.5") works
 // for the etserver TCP connection too. "ssh -G" prints the effective client
 // configuration without connecting. On any failure it returns host unchanged.
-//
-//nolint:unused // consumed by Task 6, which wires resolveHost into run.
 func resolveHost(ctx context.Context, sshPath, user, host string) string {
 	target := host
 	if user != "" {

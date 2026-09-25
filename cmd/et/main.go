@@ -1,18 +1,17 @@
-// Command et is a native Eternal Terminal client.
-//
-// This is a scaffold placeholder: it only reports its version. The client is
-// specified in the local design spec and built out by the implementation plan.
+// Command et is a native Eternal Terminal client: it starts etterminal on
+// the server over ssh, then runs an encrypted, reconnecting session with
+// etserver.
 package main
 
 import (
-	"fmt"
+	"context"
 	"os"
+	"os/signal"
 )
 
-// version is overridden at release time via -ldflags "-X main.version=...".
-var version = "dev"
-
 func main() {
-	fmt.Fprintf(os.Stderr, "et %s: not implemented yet\n", version)
-	os.Exit(1)
+	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
+	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr)
+	stop()
+	os.Exit(code)
 }
