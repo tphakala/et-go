@@ -23,7 +23,8 @@ var (
 
 const (
 	// maxOutput caps how much ssh stdout is kept. Shell startup noise before
-	// the marker is normally a few lines; the cap only bounds memory.
+	// the marker is normally a few lines, far below the cap; a marker that
+	// arrives after the cap is dropped and the start fails.
 	maxOutput = 1 << 20
 	// excerptLen caps the output excerpt quoted in an error.
 	excerptLen = 512
@@ -91,7 +92,7 @@ func Run(ctx context.Context, cfg Config) (Credentials, error) {
 	creds, parseErr := parseCredentials(out.Bytes())
 	if parseErr == nil {
 		if creds.ID == id {
-			logger.Warn("etterminal did not regenerate the session id; the passkey was visible in the local ssh command line",
+			logger.Warn("etterminal did not regenerate the session id; the passkey in use was visible in the ssh command line on both hosts",
 				"credentials", creds)
 		}
 		return creds, nil
@@ -133,8 +134,9 @@ func describeFailure(exitErr *exec.ExitError, parseErr error, out []byte) error 
 	return fmt.Errorf("%w: %s", parseErr, b.String())
 }
 
-// excerpt returns at most excerptLen bytes of the end of out, cut at the
-// marker so no part of a (possibly malformed) passkey is ever quoted.
+// excerpt returns the last excerptLen bytes of the trimmed output before the
+// first marker, prefixed with "..." when it was cut, so no part of a (possibly
+// malformed) passkey is ever quoted.
 func excerpt(out []byte) string {
 	before, _, _ := bytes.Cut(out, []byte(marker))
 	s := strings.TrimSpace(string(before))

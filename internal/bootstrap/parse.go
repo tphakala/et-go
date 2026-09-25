@@ -13,7 +13,9 @@ const marker = "IDPASSKEY:"
 // id and passkey that follow it. It requires exactly idLen alphanumeric
 // characters, a '/', then exactly passkeyLen alphanumeric characters, followed
 // by the end of output or a non-alphanumeric character. Anything before the
-// marker (banners, motd, shell noise) is ignored.
+// marker (banners, motd, shell noise) is ignored. Only the first marker counts,
+// as in the upstream client (src/terminal/SshSetupHandler.cpp, sshBuffer.find),
+// so a banner that itself prints "IDPASSKEY:" makes the start fail.
 func parseCredentials(out []byte) (Credentials, error) {
 	_, rest, found := bytes.Cut(out, []byte(marker))
 	if !found {

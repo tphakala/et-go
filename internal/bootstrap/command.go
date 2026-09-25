@@ -12,9 +12,10 @@ const (
 	defaultTerminalPath = "etterminal"
 )
 
-// termPattern and terminalPathPattern bound the two values interpolated into
-// the remote shell command (spec 4.1 item 8, spec 5.5). Neither admits a quote,
-// space or shell metacharacter.
+// termPattern and terminalPathPattern bound the two configurable values
+// interpolated into the remote shell command. Neither admits a quote, space,
+// glob, '$' or command separator; terminalPathPattern admits '~', which the
+// remote shell expands on purpose so "~/bin/etterminal" works.
 //
 // termPattern also excludes '_': etterminal splits its stdin line on '_' and
 // aborts unless there are exactly two tokens, so a TERM containing '_' kills
@@ -66,7 +67,8 @@ func (cfg *Config) validate() error {
 }
 
 // remoteCommand is the command ssh runs on the server. It mirrors upstream's
-// SshSetupHandler::genCommand: etterminal reads "<id>/<passkey>_<TERM>" on stdin.
+// genCommand (src/terminal/SshSetupHandler.cpp): etterminal reads
+// "<id>/<passkey>_<TERM>" on stdin.
 // Every interpolated value is validated or generated from [A-Za-z0-9].
 func remoteCommand(id, passkey, term, terminalPath string) string {
 	return "echo '" + id + "/" + passkey + "_" + term + "' | " + terminalPath + " --verbose=0"
@@ -87,9 +89,9 @@ func sshArgs(cfg *Config, remote string) []string {
 }
 
 func hasSpaceOrControl(s string) bool {
-	return strings.IndexFunc(s, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0
+	return strings.ContainsFunc(s, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })
 }
 
 func hasControl(s string) bool {
-	return strings.IndexFunc(s, unicode.IsControl) >= 0
+	return strings.ContainsFunc(s, unicode.IsControl)
 }

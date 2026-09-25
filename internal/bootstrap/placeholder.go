@@ -15,7 +15,7 @@ const (
 
 // placeholder returns the throwaway id and passkey sent to etterminal. They
 // are not secrets: with the regeneratePrefix the server replaces both and
-// returns the real ones on stdout (spec 4.1 item 7).
+// returns the real ones on stdout.
 //
 // rand.Text returns at least 26 base32 characters ([A-Z2-7]), all
 // alphanumeric, so slicing to 13 and to 32 (from two calls) is always in range.
