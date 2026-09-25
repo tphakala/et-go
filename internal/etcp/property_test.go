@@ -78,4 +78,19 @@ func runProperty(t *testing.T, seed uint64) {
 	}
 	cancel()
 	wg.Wait()
+
+	// expectNumbered stops at packet n-1, so a replay that delivers a packet
+	// again after the last one would pass it. With the traffic and the cuts
+	// over, let any late reconnect finish, then nothing but keepalives may
+	// still be pending on either side.
+	synctest.Sleep(time.Minute)
+	if err := expectNothingMore(t.Context(), h.srv.Recv); err != nil {
+		t.Errorf("server side: %v", err)
+	}
+	if err := expectNothingMore(t.Context(), h.conn.ReadPacket); err != nil {
+		t.Errorf("client side: %v", err)
+	}
+	if got := h.net.Dials(); got < 2 {
+		t.Errorf("Dials() = %d: no cut forced a reconnect, so the run proved nothing", got)
+	}
 }

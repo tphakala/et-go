@@ -3,12 +3,14 @@ package etcp_test
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/tphakala/et-go/internal/etcp"
 	"github.com/tphakala/et-go/internal/etservertest"
@@ -70,8 +72,9 @@ func number(p protocol.Packet) (int, error) {
 	return strconv.Atoi(string(p.Payload[:8]))
 }
 
-// expectNumbered reads packets, skipping keepalives, and checks that exactly
-// 0..n-1 arrive in order.
+// expectNumbered reads packets, skipping keepalives, and checks that 0..n-1
+// arrive in order, none lost or duplicated up to n-1. It stops there, so a
+// duplicate after the last packet needs expectNothingMore.
 func expectNumbered(ctx context.Context, n int, recv func(context.Context) (protocol.Packet, error)) error {
 	for want := 0; want < n; {
 		p, err := recv(ctx)
@@ -91,6 +94,26 @@ func expectNumbered(ctx context.Context, n int, recv func(context.Context) (prot
 		want++
 	}
 	return nil
+}
+
+// expectNothingMore reads for a minute of fake time and reports any packet
+// other than a keepalive: a packet delivered again after the expected ones.
+func expectNothingMore(ctx context.Context, recv func(context.Context) (protocol.Packet, error)) error {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	for {
+		p, err := recv(ctx)
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return nil
+			}
+			return err
+		}
+		if p.Header != protocol.HeaderKeepAlive {
+			n, _ := number(p)
+			return fmt.Errorf("unexpected packet %d after the last one (duplicated)", n)
+		}
+	}
 }
 
 // scripted is a NetDialer whose server side is a test function, for server
