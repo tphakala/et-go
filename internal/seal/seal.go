@@ -54,6 +54,9 @@ type state struct {
 
 // New returns a Stream for direction d with the nonce at its initial value.
 // It copies *key, so later changes to the caller's array do not affect it.
+// key must not be nil, and d must be ClientToServer or ServerToClient: any
+// other direction produces a nonce stream the peer never uses, so every Open
+// fails as if the key were wrong.
 func New(key *[32]byte, d Direction) *Stream {
 	k := *key
 	st := &state{key: &k}
@@ -62,15 +65,25 @@ func New(key *[32]byte, d Direction) *Stream {
 }
 
 // Seal encrypts and authenticates plaintext with the next nonce and appends
-// the box (16-byte MAC, then ciphertext) to dst.
+// the box (16-byte MAC, then ciphertext) to dst. dst must not share memory
+// with plaintext: golang.org/x/crypto/nacl/secretbox panics when the output
+// it writes overlaps the input, as it does for Seal(buf[:0], buf) whenever
+// buf has capacity for the box.
 func (s *Stream) Seal(dst, plaintext []byte) []byte {
 	s.st.increment()
 	return secretbox.Seal(dst, plaintext, &s.st.nonce, s.st.key)
 }
 
 // Open authenticates and decrypts box with the next nonce and appends the
-// plaintext to dst. It returns ErrOpen if authentication fails; the nonce
-// still advances, as it does upstream.
+// plaintext to dst. dst must not share memory with box, for the same reason
+// as in Seal; a payload from wire.ParsePacket aliases the frame buffer, so
+// that buffer cannot be reused as dst.
+//
+// If authentication fails, Open returns ErrOpen. The nonce has still
+// advanced, so the Stream is now out of step with the peer and must be
+// discarded: upstream treats a failed decrypt as fatal
+// (src/base/CryptoHandler.cpp:37-42 at et-v7.0.0), so a session cannot be
+// resumed after one.
 func (s *Stream) Open(dst, box []byte) ([]byte, error) {
 	s.st.increment()
 	out, ok := secretbox.Open(dst, box, &s.st.nonce, s.st.key)
