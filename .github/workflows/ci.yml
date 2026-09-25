@@ -120,4 +120,10 @@ jobs:
       - name: Regenerate
         run: go generate ./internal/protocol
       - name: Fail on drift
-        run: git diff --exit-code -- internal/protocol
+        run: |
+          out=$(git status --porcelain -- internal/protocol)
+          if [ -n "$out" ]; then
+            echo "$out"
+            git diff -- internal/protocol
+            exit 1
+          fi
