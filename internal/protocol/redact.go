@@ -9,8 +9,9 @@ import (
 // passkey. Its generated String method prints every field, so fmt and slog
 // would write the passkey to any log that formats the message, and the
 // passkey must never reach logs or fmt output. Format and LogValue print it
-// as REDACTED instead. An explicit call to x.String() or prototext still
-// shows the passkey; only a change to the generated code could close that.
+// as REDACTED instead. The generated String, prototext and protojson still
+// print it and cannot be changed here, so the PasskeyRendering ruleguard rule
+// (rules/secrets.go) rejects those calls at lint time.
 // A TerminalUserInfo value never reaches Format, but fmt then prints only
 // field pointers, and go vet rejects the copy (the message holds a mutex).
 
