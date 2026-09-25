@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -55,6 +56,29 @@ func TestStartRejected(t *testing.T) {
 		err := Start(t.Context(), tr, Options{})
 		if !errors.Is(err, ErrStartRejected) {
 			t.Fatalf("Start = %v, want ErrStartRejected", err)
+		}
+	})
+}
+
+// The server's rejection text reaches the user's terminal through the error,
+// so control characters in it are escaped and its length is bounded.
+func TestStartRejectedTextIsQuotedAndBounded(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		tr := newFakeTransport()
+		tr.in <- initialResponse(t, "bad\x1b]0;pwned\x07"+strings.Repeat("x", 2*maxRejectText))
+		err := Start(t.Context(), tr, Options{})
+		if !errors.Is(err, ErrStartRejected) {
+			t.Fatalf("Start = %v, want ErrStartRejected", err)
+		}
+		msg := err.Error()
+		if strings.ContainsAny(msg, "\x1b\x07") {
+			t.Fatalf("error text carries raw control characters: %q", msg)
+		}
+		if !strings.Contains(msg, `bad\x1b`) {
+			t.Fatalf("error text %q does not show the escaped server text", msg)
+		}
+		if len(msg) > len(ErrStartRejected.Error())+maxRejectText+32 {
+			t.Fatalf("error text is %d bytes, want it bounded near maxRejectText (%d)", len(msg), maxRejectText)
 		}
 	})
 }

@@ -11,6 +11,7 @@ import (
 	"io"
 	"iter"
 	"log/slog"
+	"strings"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -75,6 +76,10 @@ var (
 // server, so a large paste becomes several modest packets.
 const MaxInputPacket = 64 << 10
 
+// maxRejectText bounds how much of a rejecting INITIAL_RESPONSE's error text
+// Start includes in its error.
+const maxRejectText = 256
+
 // startTimeout is how long Start waits for INITIAL_RESPONSE.
 const startTimeout = 5 * time.Second
 
@@ -116,7 +121,12 @@ func Start(ctx context.Context, t Transport, opts Options) error {
 		return fmt.Errorf("session: decode initial response: %w", err)
 	}
 	if msg := resp.GetError(); msg != "" {
-		return fmt.Errorf("%w: %s", ErrStartRejected, msg)
+		// The text comes from the peer and ends up on the user's terminal:
+		// quote it so control sequences are escaped, and bound its length.
+		if len(msg) > maxRejectText {
+			msg = strings.ToValidUTF8(msg[:maxRejectText], "")
+		}
+		return fmt.Errorf("%w: %q", ErrStartRejected, msg)
 	}
 	return nil
 }

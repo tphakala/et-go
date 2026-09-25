@@ -43,6 +43,7 @@ func TestParseArgsDestination(t *testing.T) {
 		{name: "two destinations", args: []string{"a", "b"}, wantErr: true},
 		{name: "host looks like an option", args: []string{"--", "-evil"}, wantErr: true},
 		{name: "user looks like an option", args: []string{"--", "-evil@box"}, wantErr: true},
+		{name: "-u looks like an option", args: []string{"-u", "-oProxyCommand=x", "box"}, wantErr: true},
 		{name: "trailing colon", args: []string{"box:"}, wantErr: true},
 		{name: "bracket trailing colon", args: []string{"[::1]:"}, wantErr: true},
 	}

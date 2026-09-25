@@ -109,6 +109,12 @@ func parseArgs(args []string, stderr io.Writer) (*options, error) {
 	case dest.User == "":
 		dest.User = user
 	}
+	// The same rule as for a user in the destination: a -u value that looks
+	// like an option is a usage error here rather than an ssh argument
+	// problem found later.
+	if strings.HasPrefix(dest.User, "-") {
+		return nil, fmt.Errorf("%w: user %q looks like an option", errUsage, dest.User)
+	}
 	if keepAlive < 1 || keepAlive > 5 {
 		return nil, fmt.Errorf("%w: keepalive must be 1-5 seconds, got %d", errUsage, keepAlive)
 	}

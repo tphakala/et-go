@@ -66,6 +66,18 @@ func (p *proxy) connections() int {
 	return p.accepted
 }
 
+// waitConnections waits until the proxy has forwarded at least n connections.
+func (p *proxy) waitConnections(t *testing.T, n int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for p.connections() < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("proxy forwarded %d connection(s) after %v, want %d: et did not reconnect", p.connections(), timeout, n)
+		}
+		time.Sleep(50 * time.Millisecond) // real network timing: this is not a synctest test
+	}
+}
+
 func startProxy(t *testing.T) *proxy {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -198,7 +210,11 @@ func (tm *term) waitFor(s string, timeout time.Duration) string {
 		select {
 		case <-tm.notify:
 		case <-deadline:
-			tm.t.Fatalf("timed out after %v waiting for %q; see transcript.log in the artifact dir", timeout, s)
+			// The artifact dir is removed after the test unless go test runs
+			// with -artifacts, so show the end of the output here as well.
+			out := tm.output()
+			tm.t.Fatalf("timed out after %v waiting for %q; output ends with:\n%s\n(full transcript.log is kept in the artifact dir with go test -artifacts)",
+				timeout, s, out[max(0, len(out)-2000):])
 		}
 	}
 }
@@ -318,12 +334,14 @@ func TestReconnectUnderLoad(t *testing.T) {
 		if strings.Contains(tm.output(), "END\n") {
 			t.Fatalf("output finished before cut %d; the test no longer cuts mid-stream", i+1)
 		}
+		before := p.connections()
 		p.cutAll()
+		p.waitConnections(t, before+1, 30*time.Second) // et reconnected after this cut
 	}
 	out := tm.waitFor("END\n", 5*time.Minute)
 	checkSeq(t, out, 200000)
-	if n := p.connections(); n < 2 {
-		t.Fatalf("proxy forwarded %d connection(s); et never reconnected", n)
+	if n := p.connections(); n < 4 {
+		t.Fatalf("proxy forwarded %d connection(s), want at least 4: the first and one per cut", n)
 	}
 	t.Logf("proxy forwarded %d connections for 3 cuts", p.connections())
 
