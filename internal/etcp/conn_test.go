@@ -232,11 +232,18 @@ func TestReconnectSurvivesCutsAnywhere(t *testing.T) {
 						t.Fatalf("Send: %v", err)
 					}
 				}
-				if err := expectNumbered(t.Context(), 20, h.srv.Recv); err != nil {
+				ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
+				defer cancel()
+				if err := expectNumbered(ctx, 20, h.srv.Recv); err != nil {
 					t.Fatalf("server side: %v", err)
 				}
-				if err := expectNumbered(t.Context(), 20, h.conn.ReadPacket); err != nil {
+				if err := expectNumbered(ctx, 20, h.conn.ReadPacket); err != nil {
 					t.Fatalf("client side: %v", err)
+				}
+				// The initial link, the one CutAll ends, and the one after
+				// the budgeted cut: fewer means the cut never landed.
+				if got := h.net.Dials(); got < 3 {
+					t.Fatalf("Dials() = %d, want at least 3: the cut after %d bytes never fired", got, n)
 				}
 			})
 		})
