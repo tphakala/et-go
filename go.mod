@@ -2,4 +2,18 @@ module github.com/tphakala/et-go
 
 go 1.27.0
 
-require github.com/quasilyte/go-ruleguard/dsl v0.3.23
+require (
+	github.com/quasilyte/go-ruleguard/dsl v0.3.23
+	google.golang.org/protobuf v1.36.12
+)
+
+require (
+	golang.org/x/mod v0.41.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/tools v0.50.0 // indirect
+)
+
+tool (
+	golang.org/x/tools/cmd/stringer
+	google.golang.org/protobuf/cmd/protoc-gen-go
+)

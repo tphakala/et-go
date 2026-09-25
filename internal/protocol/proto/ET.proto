@@ -1,0 +1,45 @@
+// Copied from Eternal Terminal (https://github.com/MisterTea/EternalTerminal),
+// proto/ET.proto at commit 6f53869473a16407b59f1f3382d291ab97b4f64f.
+// Copyright Jason Gauci and contributors, licensed under the Apache License,
+// Version 2.0. Unmodified apart from this header; see NOTICE.
+
+syntax = "proto2";
+package et;
+option optimize_for = LITE_RUNTIME;
+
+enum EtPacketType {
+  // Count down from 254 to avoid collisions
+  HEARTBEAT = 254;
+  INITIAL_PAYLOAD = 253;
+  INITIAL_RESPONSE = 252;
+}
+
+message ConnectRequest {
+  optional string clientId = 1;
+  optional int32 version = 2;
+}
+
+enum ConnectStatus {
+  NEW_CLIENT = 1;
+  RETURNING_CLIENT = 2;
+  INVALID_KEY = 3;
+  MISMATCHED_PROTOCOL = 4;
+}
+
+message ConnectResponse {
+  optional ConnectStatus status = 1;
+  optional string error = 2;
+}
+
+message SequenceHeader {
+  optional int32 sequenceNumber = 1;
+}
+
+message CatchupBuffer {
+  repeated bytes buffer = 1;
+}
+
+message SocketEndpoint {
+  optional string name = 1;
+  optional int32 port = 2;
+}

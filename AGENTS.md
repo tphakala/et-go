@@ -16,6 +16,7 @@ Module path: `github.com/tphakala/et-go`. Go version: see `go.mod`.
 | Path     | Role                                                              |
 | -------- | ----------------------------------------------------------------- |
 | `cmd/et` | Entry point and flag parsing.                                     |
+| `internal/protocol` | Wire messages generated from upstream's `.proto` files (opaque API), plus `Header`, `Version` and `Packet`. Regenerate with `go generate ./internal/protocol` (needs protoc 3.21.12). |
 | `rules/` | ruleguard matchers used by golangci-lint (build tag `ruleguard`). |
 
 Update this table when a package is added.
