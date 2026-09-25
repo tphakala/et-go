@@ -1,0 +1,13 @@
+et-go
+Copyright 2026 Tomi P. Hakala
+
+This product is a client for the Eternal Terminal protocol and interoperates
+with the Eternal Terminal server (etserver/etterminal).
+
+The protocol buffer definitions under internal/protocol/proto are copied from
+Eternal Terminal (https://github.com/MisterTea/EternalTerminal), Copyright
+Jason Gauci and contributors, licensed under the Apache License, Version 2.0.
+
+Design ideas were drawn from eternal-terminal-client
+(https://github.com/AArnott/eternal-terminal-client), Copyright Andrew Arnott,
+licensed under the MIT License. No source code from that project is included.

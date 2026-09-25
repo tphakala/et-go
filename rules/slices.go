@@ -1,0 +1,290 @@
+//go:build ruleguard
+
+package gorules
+
+import "github.com/quasilyte/go-ruleguard/dsl"
+
+// SortToSlices detects sort.Ints/sort.Strings/sort.Float64s (and their
+// *AreSorted variants) and suggests the generic slices.Sort/slices.IsSorted.
+//
+// Old patterns:
+//
+//	sort.Ints(nums)
+//	sort.Strings(strs)
+//	sort.Float64s(floats)
+//
+// New pattern (Go 1.21+):
+//
+//	slices.Sort(nums)
+//	slices.Sort(strs)
+//	slices.Sort(floats)
+//
+// Benefits:
+//   - Generic, works with any ordered slice
+//   - Consistent API across types
+//   - Part of the new slices package
+//
+// See: https://pkg.go.dev/slices#Sort
+func SortToSlices(m dsl.Matcher) {
+	m.Match(
+		`sort.Ints($s)`,
+	).
+		Report("use slices.Sort($s) instead of sort.Ints (Go 1.21+)").
+		Suggest("slices.Sort($s)")
+
+	m.Match(
+		`sort.Strings($s)`,
+	).
+		Report("use slices.Sort($s) instead of sort.Strings (Go 1.21+)").
+		Suggest("slices.Sort($s)")
+
+	m.Match(
+		`sort.Float64s($s)`,
+	).
+		Report("use slices.Sort($s) instead of sort.Float64s (Go 1.21+)").
+		Suggest("slices.Sort($s)")
+
+	// sort.IntsAreSorted, etc.
+	m.Match(
+		`sort.IntsAreSorted($s)`,
+	).
+		Report("use slices.IsSorted($s) instead of sort.IntsAreSorted (Go 1.21+)").
+		Suggest("slices.IsSorted($s)")
+
+	m.Match(
+		`sort.StringsAreSorted($s)`,
+	).
+		Report("use slices.IsSorted($s) instead of sort.StringsAreSorted (Go 1.21+)").
+		Suggest("slices.IsSorted($s)")
+
+	m.Match(
+		`sort.Float64sAreSorted($s)`,
+	).
+		Report("use slices.IsSorted($s) instead of sort.Float64sAreSorted (Go 1.21+)").
+		Suggest("slices.IsSorted($s)")
+}
+
+// BytesClone detects manual byte slice cloning and suggests bytes.Clone.
+//
+// Old patterns (only the append-based forms are detected; the make+copy form
+// is not matched):
+//
+//	clone := append([]byte(nil), original...)
+//	clone := append([]byte{}, original...)
+//
+// New pattern (Go 1.20+):
+//
+//	clone := bytes.Clone(original)
+//
+// Benefits:
+//   - More readable
+//   - Less error-prone
+//   - Single function call
+//
+// See: https://pkg.go.dev/bytes#Clone
+func BytesClone(m dsl.Matcher) {
+	// Pattern: append([]byte(nil), b...)
+	m.Match(
+		`append([]byte(nil), $b...)`,
+	).
+		Report("use bytes.Clone($b) instead of append([]byte(nil), $b...) (Go 1.20+)")
+
+	// Pattern: append([]byte{}, b...)
+	m.Match(
+		`append([]byte{}, $b...)`,
+	).
+		Report("use bytes.Clone($b) instead of append([]byte{}, $b...) (Go 1.20+)")
+
+	// Pattern: append(b[:0:0], b...)
+	m.Match(
+		`append($b[:0:0], $b...)`,
+	).
+		Where(m["b"].Type.Is("[]byte")).
+		Report("use bytes.Clone($b) instead of append($b[:0:0], $b...) (Go 1.20+)")
+}
+
+// SlicesClone detects manual slice cloning patterns and suggests slices.Clone.
+//
+// Old patterns (only the append-based forms are detected; the make+copy form
+// is not matched):
+//
+//	clone := append([]T(nil), original...)
+//
+// New pattern (Go 1.21+):
+//
+//	clone := slices.Clone(original)
+//
+// Benefits:
+//   - More readable
+//   - Less error-prone
+//   - Single function call
+//
+// See: https://pkg.go.dev/slices#Clone
+func SlicesClone(m dsl.Matcher) {
+	// Pattern: append([]T(nil), s...)
+	// This is a common idiom for cloning slices
+	// Note: Exclude []byte to avoid duplicate warnings with BytesClone rule
+	m.Match(
+		`append([]$typ(nil), $s...)`,
+	).
+		Where(m["typ"].Text != "byte").
+		Report("use slices.Clone($s) instead of append([]$typ(nil), $s...) (Go 1.21+)")
+
+	m.Match(
+		`append([]$typ{}, $s...)`,
+	).
+		Where(m["typ"].Text != "byte").
+		Report("use slices.Clone($s) instead of append([]$typ{}, $s...) (Go 1.21+)")
+
+	// append(s[:0:0], s...) pattern
+	// Exclude []byte slices - those are handled by BytesClone
+	m.Match(
+		`append($s[:0:0], $s...)`,
+	).
+		Where(!m["s"].Type.Is("[]byte")).
+		Report("use slices.Clone($s) instead of append($s[:0:0], $s...) (Go 1.21+)")
+}
+
+// BackwardIteration detects the "i > -1" spelling of manual reverse slice
+// iteration and suggests slices.Backward. The more common "i >= 0" spelling
+// is not matched here: verified modernize's slicesbackward analyzer already
+// catches it, with autofix, and is already correctly slice-type-guarded (no
+// false positive on strings, where len/index work but slices.Backward does
+// not compile) -- exact duplicate, no informational gain. slicesbackward
+// does not recognize the "i > -1" spelling at all, so that half stays.
+//
+// Old pattern:
+//
+//	for i := len(s) - 1; i > -1; i-- {
+//	    process(s[i])
+//	}
+//
+// New pattern (Go 1.23+):
+//
+//	for i, v := range slices.Backward(s) {
+//	    process(v)
+//	}
+//
+// Benefits:
+//   - Clearer intent
+//   - Less error-prone (off-by-one errors)
+//   - Works with iterator composition
+//
+// See: https://pkg.go.dev/slices#Backward
+func BackwardIteration(m dsl.Matcher) {
+	// Slice-type guard: slices.Backward is defined over []E, so without it the
+	// advice fires on strings (where len/index work but slices.Backward does
+	// not compile).
+	m.Match(
+		`for $i := len($s) - 1; $i > -1; $i-- { $*body }`,
+	).
+		Where(m["s"].Type.Underlying().Is(`[]$elem`)).
+		Report("use slices.Backward($s) for reverse iteration (Go 1.23+)")
+}
+
+// MapKeysCollection detects manual map key collection patterns and suggests maps.Keys.
+//
+// Old pattern:
+//
+//	keys := make([]string, 0, len(m))
+//	for k := range m {
+//	    keys = append(keys, k)
+//	}
+//
+// New pattern (Go 1.23+):
+//
+//	keys := slices.Collect(maps.Keys(m))
+//
+// Benefits:
+//   - More concise and readable
+//   - Works with iterator composition
+//   - Can be sorted directly: slices.Sorted(maps.Keys(m))
+//
+// See: https://pkg.go.dev/maps#Keys
+// See: https://pkg.go.dev/slices#Collect
+func MapKeysCollection(m dsl.Matcher) {
+	// Pattern: for k := range m { keys = append(keys, k) }
+	// This is a common pattern for collecting map keys
+	// Type guard ensures we only match maps, not channels or iterators
+	m.Match(
+		`for $k := range $m { $keys = append($keys, $k) }`,
+	).
+		Where(m["m"].Type.Is("map[$k]$v")).
+		Report("use slices.Collect(maps.Keys($m)) to collect map keys (Go 1.23+)")
+
+	// Pattern with underscore for value: for k, _ := range m
+	m.Match(
+		`for $k, _ := range $m { $keys = append($keys, $k) }`,
+	).
+		Where(m["m"].Type.Is("map[$k]$v")).
+		Report("use slices.Collect(maps.Keys($m)) to collect map keys (Go 1.23+)")
+}
+
+// MapValuesCollection detects manual map value collection patterns and suggests maps.Values.
+//
+// Old pattern:
+//
+//	values := make([]V, 0, len(m))
+//	for _, v := range m {
+//	    values = append(values, v)
+//	}
+//
+// New pattern (Go 1.23+):
+//
+//	values := slices.Collect(maps.Values(m))
+//
+// See: https://pkg.go.dev/maps#Values
+// See: https://pkg.go.dev/slices#Collect
+func MapValuesCollection(m dsl.Matcher) {
+	// Pattern: for _, v := range m { values = append(values, v) }
+	// Type guard ensures we only match maps, not slices or other iterables
+	m.Match(
+		`for _, $v := range $m { $values = append($values, $v) }`,
+	).
+		Where(m["m"].Type.Is("map[$k]$v")).
+		Report("use slices.Collect(maps.Values($m)) to collect map values (Go 1.23+)")
+}
+
+// SliceRepeat detects manual slice repetition patterns and suggests slices.Repeat.
+//
+// Old pattern:
+//
+//	result := make([]T, 0, len(s)*n)
+//	for i := 0; i < n; i++ {
+//	    result = append(result, s...)
+//	}
+//
+// New pattern (Go 1.23+):
+//
+//	result := slices.Repeat(s, n)
+//
+// See: https://pkg.go.dev/slices#Repeat
+func SliceRepeat(m dsl.Matcher) {
+	// Pattern: for loop appending same slice multiple times
+	m.Match(
+		`for $i := 0; $i < $n; $i++ { $result = append($result, $s...) }`,
+	).
+		Report("use slices.Repeat($s, $n) instead of manual repetition loop (Go 1.23+); false positive if $s depends on the loop variable")
+
+	// Pattern: range-over-integer form (with variable)
+	// Require exactly int. Without a guard, `for i := range items` over a []T
+	// (ranging the slice, not a count) matches and yields a non-compiling
+	// slices.Repeat(s, items). slices.Repeat's count parameter is exactly int,
+	// so a named int type or int64 would also not compile; Type.Is("int") (not
+	// OfKind, which would match those) keeps the advice to compiling cases.
+	// Note: Type.Is("int") already covers the untyped-constant form `for range 5`
+	// (go/types gives the constant its default type int in range context), so a
+	// separate "untyped int" check is neither needed nor valid as a Type.Is arg.
+	m.Match(
+		`for $i := range $n { $result = append($result, $s...) }`,
+	).
+		Where(m["n"].Type.Is("int")).
+		Report("use slices.Repeat($s, $n) instead of manual repetition loop (Go 1.23+); false positive if $s depends on the loop variable")
+
+	// Pattern: range-over-integer form (without variable)
+	m.Match(
+		`for range $n { $result = append($result, $s...) }`,
+	).
+		Where(m["n"].Type.Is("int")).
+		Report("use slices.Repeat($s, $n) instead of manual repetition loop (Go 1.23+)")
+}

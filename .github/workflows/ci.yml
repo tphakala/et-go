@@ -1,0 +1,100 @@
+name: ci
+on:
+  # Filter push to main so a push to a PR branch does not run the matrix twice
+  # (once for push, once for pull_request); pull_request already covers PR branches.
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+# Cancel superseded runs on the same ref so a rapid re-push does not pile up
+# duplicate in-flight runs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  # Pinned to match the local toolchain so local runs and CI use the same
+  # linter version (and the same ruleguard behavior).
+  GOLANGCI_LINT_VERSION: 'v2.13.2'
+jobs:
+  build:
+    name: Build and test
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+      - run: go vet ./...
+      - name: Test (race)
+        if: matrix.os == 'ubuntu-latest'
+        run: go test ./... -race -coverprofile=coverage.out -covermode=atomic
+      - name: Upload coverage to Codecov
+        if: matrix.os == 'ubuntu-latest'
+        uses: codecov/codecov-action@v7
+        with:
+          files: coverage.out
+          fail_ci_if_error: false
+      # No -race on Windows: the race detector needs a cgo C toolchain that the
+      # windows-latest runner does not provide on PATH.
+      - name: Test (Windows)
+        if: matrix.os == 'windows-latest'
+        run: go test ./...
+      - name: Test (macOS, race)
+        if: matrix.os == 'macos-latest'
+        run: go test ./... -race
+  cross:
+    name: Cross-compile
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - windows/amd64
+          - windows/arm64
+          - linux/arm64
+          - darwin/arm64
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # The client must stay pure Go (CGO_ENABLED=0) so a single static binary
+      # ships for every target, Windows on ARM included.
+      - name: Build ${{ matrix.target }}
+        env:
+          CGO_ENABLED: '0'
+          MATRIX_TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          GOOS="${MATRIX_TARGET%/*}" GOARCH="${MATRIX_TARGET#*/}" go build ./...
+          GOOS="${MATRIX_TARGET%/*}" GOARCH="${MATRIX_TARGET#*/}" go vet ./...
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # The ruleguard matchers in rules/*.go carry the //go:build ruleguard tag, so a
+      # syntax error in one compiles clean under the normal toolchain and silently
+      # disables the entire ruleguard layer while golangci-lint still reports 0 issues.
+      # Compile them explicitly so a broken rule fails CI instead of going unnoticed.
+      - name: Ruleguard rules compile
+        run: go build -tags ruleguard ./rules/
+      # Lint Windows too: platform code is split by build tags and _windows.go
+      # suffixes, which a Linux-only lint run never type-checks.
+      - name: Run golangci-lint (linux)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+      - name: Run golangci-lint (windows)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        env:
+          GOOS: windows
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}

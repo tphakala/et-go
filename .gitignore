@@ -1,0 +1,35 @@
+# Compiled binaries
+/et
+/et.exe
+/dist/
+*.exe
+*.test
+*.out
+*.prof
+# go test -artifacts output (testing.T.ArtifactDir)
+_artifacts/
+
+# Go workspace / vendor
+/vendor/
+go.work
+go.work.sum
+
+# Local design specs, implementation plans and research notes (never committed)
+/docs/
+/plans/
+/specs/
+/notes/
+*-design.md
+*-plan.md
+
+# Editor / OS noise
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+.claude/
+.serena/
+.sentrux/
+.codegraph/
+.superpowers/
