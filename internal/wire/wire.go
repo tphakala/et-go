@@ -16,7 +16,6 @@ package wire
 import (
 	"errors"
 	"io"
-	"slices"
 )
 
 // Size limits for lengths read from the network.
@@ -46,15 +45,11 @@ var ErrShortPacket = errors.New("wire: packet shorter than its 2-byte header")
 // caller's buffer; the buffer then doubles as bytes arrive.
 const growChunk = 64 << 10
 
-// bodyErr maps an io.EOF (possibly wrapped) from a body read to
-// io.ErrUnexpectedEOF. A body read happens only after a complete length
-// prefix, so an end of stream there, whether before the first body byte or
-// between two growth chunks, is a broken link, not a clean end of stream.
+// bodyErr classifies a failed body read as headerErr does after one byte: a
+// body read always follows a complete length prefix, so any end of stream
+// there is io.ErrUnexpectedEOF.
 func bodyErr(err error) error {
-	if errors.Is(err, io.EOF) {
-		return io.ErrUnexpectedEOF
-	}
-	return err
+	return headerErr(1, err)
 }
 
 // headerErr classifies a failed length-prefix read that got n bytes. Only a
@@ -74,9 +69,9 @@ func headerErr(n int, err error) error {
 
 // readBody reads exactly n bytes into buf's storage and returns buf[:n],
 // reusing buf's capacity when it is large enough. Otherwise the buffer grows
-// as bytes arrive, starting at growChunk and doubling, so a peer that
-// declares a large length and sends little costs memory in proportion to
-// what it sent, not to what it declared.
+// as bytes arrive, starting at growChunk and doubling, with the last step
+// capped at n, so a peer that declares a large length and sends little costs
+// memory in proportion to what it sent, not to what it declared.
 func readBody(r io.Reader, buf []byte, n int) ([]byte, error) {
 	if cap(buf) >= n {
 		buf = buf[:n]
@@ -88,7 +83,13 @@ func readBody(r io.Reader, buf []byte, n int) ([]byte, error) {
 	buf = buf[:0]
 	for len(buf) < n {
 		next := min(n, max(2*len(buf), growChunk))
-		buf = slices.Grow(buf, next-len(buf))
+		if cap(buf) < next {
+			// An exact copy, not slices.Grow, whose append growth would
+			// round the last step past n.
+			nb := make([]byte, len(buf), next)
+			copy(nb, buf)
+			buf = nb
+		}
 		m, err := io.ReadFull(r, buf[len(buf):next])
 		buf = buf[:len(buf)+m]
 		if err != nil {

@@ -170,6 +170,21 @@ func TestWriteMessageSingleWrite(t *testing.T) {
 	}
 }
 
+// TestWriteMessageAllocs pins that WriteMessage marshals straight into its
+// output buffer: the only allocation is that buffer, not a separate
+// marshalled body copied into it.
+func TestWriteMessageAllocs(t *testing.T) {
+	req := &protocol.ConnectRequest{}
+	req.SetClientId(string(bytes.Repeat([]byte{'x'}, 1<<10)))
+	req.SetVersion(protocol.Version)
+	allocs := testing.AllocsPerRun(100, func() {
+		_ = WriteMessage(io.Discard, req)
+	})
+	if allocs > 1 {
+		t.Fatalf("WriteMessage allocated %v times per call, want at most 1", allocs)
+	}
+}
+
 func TestReadMessageGarbage(t *testing.T) {
 	// Length 2, then bytes that are not a valid protobuf (field 0 is illegal).
 	in := []byte{2, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x00}

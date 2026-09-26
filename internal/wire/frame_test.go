@@ -287,6 +287,27 @@ func TestReadFrameGrowsWithData(t *testing.T) {
 	}
 }
 
+// A body that outgrows the caller's buffer ends in a buffer of exactly the
+// declared length: the last growth step is capped at the length, not rounded
+// up by append's growth policy.
+func TestReadFrameGrowsExactly(t *testing.T) {
+	const n = 300_000
+	var enc bytes.Buffer
+	if err := WriteFrame(&enc, bytes.Repeat([]byte{'x'}, n)); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+	got, err := ReadFrame(&enc, nil)
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	if len(got) != n || cap(got) != n {
+		t.Fatalf("ReadFrame body len %d cap %d, want both %d", len(got), cap(got), n)
+	}
+	if !bytes.Equal(got, bytes.Repeat([]byte{'x'}, n)) {
+		t.Fatal("ReadFrame body differs from the frame written")
+	}
+}
+
 // ReadFrame into a buffer that is large enough, and AppendFrame into one,
 // allocate nothing: etcp's read and write loops run them for every packet.
 func TestFrameSteadyStateAllocs(t *testing.T) {

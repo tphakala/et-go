@@ -54,10 +54,13 @@ type state struct {
 
 // New returns a Stream for direction d with the nonce at its initial value.
 // It copies *key, so later changes to the caller's array do not affect it.
-// key must not be nil, and d must be ClientToServer or ServerToClient: any
-// other direction produces a nonce stream the peer never uses, so every Open
-// fails as if the key were wrong.
+// Both misuses are programming errors and panic: a nil key, and a d other
+// than ClientToServer or ServerToClient, which would produce a nonce stream
+// the peer never uses, so every Open would fail as if the key were wrong.
 func New(key *[32]byte, d Direction) *Stream {
+	if d != ClientToServer && d != ServerToClient {
+		panic(fmt.Sprintf("seal: invalid direction %d", d))
+	}
 	k := *key
 	st := &state{key: &k}
 	st.nonce[len(st.nonce)-1] = byte(d)
