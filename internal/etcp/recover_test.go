@@ -299,9 +299,9 @@ func TestWritePacketRacingRecovery(t *testing.T) {
 }
 
 // A link that recovers and then dies before writing anything must not let the
-// replay ring grow past ReplayLimit: recover counts our catchup as sent, which
+// replay ring grow without bound: recover counts our catchup as sent, which
 // frees WritePacket to admit another ReplayLimit of packets, so recover must
-// also trim what it has now written. The server here reports its
+// also trim what the server has acknowledged. The server here reports its
 // true received count in each SequenceHeader and drops every link right after
 // the exchange, while the caller keeps writing.
 func TestFlappingLinkKeepsRingBounded(t *testing.T) {
@@ -378,10 +378,108 @@ func TestFlappingLinkKeepsRingBounded(t *testing.T) {
 		if lastCatchup.Load() == 0 {
 			t.Fatal("writer stalled: the last recover carried no catchup")
 		}
-		// At most ReplayLimit of written entries survive a trim, plus the
-		// unsent backlog WritePacket admits: ReplayLimit and one packet.
-		if got, bound := etcp.RingBytes(conn), 2*limit+sealed; got > bound {
+		// This server decodes every catchup and acknowledges it on the next
+		// link, so recover's hold keeps only the latest catchup, which is at
+		// most the backlog WritePacket admits (ReplayLimit and one packet).
+		// Add the new backlog admitted since.
+		if got, bound := etcp.RingBytes(conn), 2*(limit+sealed); got > bound {
 			t.Fatalf("ring holds %d bytes after %d links, want at most %d", got, s.dials.Load(), bound)
+		}
+	})
+}
+
+// A recover succeeds on our side once the server has read our catchup, but
+// the server counts it only after decoding the whole message, and it starts
+// writing on the new link only after that (src/base/Connection.cpp:134-142
+// and src/base/BackedWriter.cpp:17-18 at et-v7.0.0). If the link dies in
+// between, the next SequenceHeader asks for the same catchup again, so it
+// must still be in the ring even though it exceeds ReplayLimit.
+func TestCatchupKeptUntilServerSpeaks(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const (
+			limit = 1 << 10
+			n     = 5 // 5 packets of about 218 sealed bytes: over the limit
+		)
+		got := make(chan []int, 1)
+		s := &scripted{handle: func(i int, c *rawServer) {
+			switch i {
+			case 0:
+				// Accept the link and read nothing, so every packet below
+				// is still unsent when it drops.
+				if c.respond(protocol.ConnectStatus_NEW_CLIENT) == nil {
+					time.Sleep(time.Second)
+				}
+			case 1:
+				c.lostCatchup()
+			case 2:
+				got <- c.recoverAll()
+				c.drain()
+			}
+		}}
+		d := etcp.Dialer{NetDialer: s, ReplayLimit: limit}
+		conn, err := d.Dial(t.Context(), testAddr, testID, testKey)
+		if err != nil {
+			t.Fatalf("Dial: %v", err)
+		}
+		defer func() {
+			_ = conn.Close()
+			s.wg.Wait()
+		}()
+		for i := range n {
+			if err := conn.WritePacket(t.Context(), numbered(i, 200)); err != nil {
+				t.Fatalf("WritePacket %d: %v", i, err)
+			}
+		}
+		nums := within(t, got)
+		if nums == nil {
+			// The exchange failed on our side; the Conn says why.
+			_, err := readPacket(t, conn)
+			t.Fatalf("second recover failed; ReadPacket = %v", err)
+		}
+		if len(nums) != n || nums[0] != 0 || nums[n-1] != n-1 {
+			t.Fatalf("second recover carried packets %v, want 0..%d", nums, n-1)
+		}
+	})
+}
+
+// The server writes on a recovered link only after it has decoded our whole
+// catchup (src/base/BackedWriter.cpp:17-18 at et-v7.0.0), so its first
+// packet there ends the hold, and the ring goes back to ReplayLimit.
+func TestServerPacketReleasesCatchup(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const limit = 1 << 10
+		h := newHarness(t, etcp.Dialer{ReplayLimit: limit})
+		defer h.close()
+
+		synctest.Wait()
+		h.net.SetRefuse(true)
+		h.net.CutAll()
+		synctest.Wait()
+		const n = 5 // about 1090 sealed bytes: over the limit
+		for i := range n {
+			if err := h.conn.WritePacket(t.Context(), numbered(i, 200)); err != nil {
+				t.Fatalf("WritePacket %d: %v", i, err)
+			}
+		}
+		h.net.SetRefuse(false)
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		if err := expectNumbered(ctx, n, h.srv.Recv); err != nil {
+			t.Fatalf("server side: %v", err)
+		}
+		synctest.Wait()
+		if got := etcp.RingBytes(h.conn); got <= limit {
+			t.Fatalf("ring holds %d bytes before the server spoke, want the whole catchup (over %d)", got, limit)
+		}
+		if err := h.srv.Send(ctx, numbered(0, 10)); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if err := expectNumbered(ctx, 1, h.conn.ReadPacket); err != nil {
+			t.Fatalf("client side: %v", err)
+		}
+		synctest.Wait()
+		if got := etcp.RingBytes(h.conn); got > limit {
+			t.Fatalf("ring holds %d bytes after the server spoke, want at most %d", got, limit)
 		}
 	})
 }

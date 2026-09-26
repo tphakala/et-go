@@ -11,14 +11,15 @@ import (
 	"github.com/tphakala/et-go/internal/etservertest"
 )
 
-// throttledDialer slows every client-side write to 1 KiB per 125 ms of fake
-// time (8 KiB/s), like a congested uplink, or with downlink set every
-// client-side read instead, like a congested downlink.
+// throttledDialer slows every client-side write to 1 KiB every perKiB of fake
+// time (zero means 125 ms, 8 KiB/s), like a congested uplink, or with
+// downlink set every client-side read instead, like a congested downlink.
 type throttledDialer struct {
 	inner interface {
 		DialContext(ctx context.Context, network, address string) (net.Conn, error)
 	}
 	downlink bool
+	perKiB   time.Duration
 }
 
 func (d throttledDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
@@ -29,7 +30,11 @@ func (d throttledDialer) DialContext(ctx context.Context, network, address strin
 	if d.downlink {
 		return slowReadConn{c}, nil
 	}
-	return throttledConn{c}, nil
+	perKiB := d.perKiB
+	if perKiB == 0 {
+		perKiB = 125 * time.Millisecond
+	}
+	return throttledConn{Conn: c, perKiB: perKiB}, nil
 }
 
 // slowReadConn reads at most 1 KiB per 125 ms of fake time.
@@ -43,7 +48,10 @@ func (c slowReadConn) Read(p []byte) (int, error) {
 	return n, err
 }
 
-type throttledConn struct{ net.Conn }
+type throttledConn struct {
+	net.Conn
+	perKiB time.Duration
+}
 
 func (c throttledConn) Write(p []byte) (int, error) {
 	var n int
@@ -54,7 +62,7 @@ func (c throttledConn) Write(p []byte) (int, error) {
 			return n, err
 		}
 		p = p[m:]
-		time.Sleep(125 * time.Millisecond)
+		time.Sleep(c.perKiB)
 	}
 	return n, nil
 }

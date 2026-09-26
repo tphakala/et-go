@@ -10,6 +10,10 @@ type ring struct {
 	entries [][]byte
 	bytes   int
 	limit   int
+	// While held, trim keeps entries at or after hold, the sequence the
+	// peer last acknowledged, until written entries exceed twice limit.
+	held bool
+	hold int64
 }
 
 // next is the sequence number the next pushed packet gets, which is also the
@@ -25,10 +29,14 @@ func (r *ring) push(data []byte) {
 // bytes, never dropping an entry at or after keep (not yet written to any
 // link). unsent is the size of the entries from keep on; the limit applies
 // to written entries alone, so a full backlog cannot squeeze out the replay
-// copies of packets still in flight.
+// copies of packets still in flight. While held, entries at or after hold
+// are dropped only once written entries exceed twice limit.
 func (r *ring) trim(keep int64, unsent int) {
 	n := 0
 	for n < len(r.entries) && r.bytes-unsent > r.limit && r.first+int64(n) < keep {
+		if r.held && r.first+int64(n) >= r.hold && r.bytes-unsent <= 2*r.limit {
+			break
+		}
 		r.bytes -= len(r.entries[n])
 		r.entries[n] = nil
 		n++

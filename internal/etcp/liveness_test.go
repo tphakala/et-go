@@ -141,6 +141,84 @@ func TestLivenessDetectsDeadLink(t *testing.T) {
 	})
 }
 
+// Writes that complete with nothing behind them prove nothing: a dead link's
+// send buffer still takes them. Typing into a link whose server never answers
+// must not keep it alive.
+func TestLivenessTypingDoesNotHideDeadLink(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, etcp.Dialer{})
+		defer h.close()
+		h.srv.EchoKeepAlive(false)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		defer func() {
+			cancel()
+			<-done
+		}()
+		go func() { // a keystroke every 2 s
+			defer close(done)
+			for i := 0; ctx.Err() == nil; i++ {
+				if h.conn.WritePacket(ctx, numbered(i, 10)) != nil {
+					return
+				}
+				select {
+				case <-time.After(2 * time.Second):
+				case <-ctx.Done():
+				}
+			}
+		}()
+
+		// Probe at 5 s, dead at 10 s, immediate redial.
+		synctest.Sleep(9 * time.Second)
+		if got := h.net.Dials(); got != 1 {
+			t.Fatalf("Dials() = %d at 9 s, want 1", got)
+		}
+		synctest.Sleep(2 * time.Second)
+		if got := h.net.Dials(); got != 2 {
+			t.Fatalf("Dials() = %d at 11 s, want 2: keystrokes kept a dead link alive", got)
+		}
+	})
+}
+
+// Packets larger than one write piece prove nothing either while no probe
+// waits behind them: the send buffer takes every piece at once.
+func TestLivenessLargeWritesDoNotHideDeadLink(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, etcp.Dialer{})
+		defer h.close()
+		h.srv.EchoKeepAlive(false)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		defer func() {
+			cancel()
+			<-done
+		}()
+		go func() { // a 5 KiB packet every 3 s
+			defer close(done)
+			for i := 0; ctx.Err() == nil; i++ {
+				if h.conn.WritePacket(ctx, numbered(i, 5<<10)) != nil {
+					return
+				}
+				select {
+				case <-time.After(3 * time.Second):
+				case <-ctx.Done():
+				}
+			}
+		}()
+
+		synctest.Sleep(9 * time.Second)
+		if got := h.net.Dials(); got != 1 {
+			t.Fatalf("Dials() = %d at 9 s, want 1", got)
+		}
+		synctest.Sleep(2 * time.Second)
+		if got := h.net.Dials(); got != 2 {
+			t.Fatalf("Dials() = %d at 11 s, want 2: large writes kept a dead link alive", got)
+		}
+	})
+}
+
 // While the reader is blocked on a caller that is not reading, the link is
 // not declared dead: that silence is ours, not the network's.
 func TestLivenessIgnoresSlowReader(t *testing.T) {
@@ -189,10 +267,9 @@ func TestDialRejectsOversizedProbe(t *testing.T) {
 }
 
 // A long upload over a slow uplink queues the probe behind the backlog, so
-// its echo comes late while the server itself sends nothing, and the
-// watcher may drop the link (the KeepAlive doc states this limit). Whatever
-// reconnects that costs, every packet must still arrive exactly once and in
-// order.
+// its echo comes late while the server itself sends nothing. Whatever
+// reconnects that may cost, every packet must still arrive exactly once and
+// in order.
 func TestLivenessSlowUploadDeliversEverything(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		srv := etservertest.NewServer(testID, testKey)
@@ -215,6 +292,43 @@ func TestLivenessSlowUploadDeliversEverything(t *testing.T) {
 		defer cancel()
 		if err := expectNumbered(ctx, n, srv.Recv); err != nil {
 			t.Fatalf("server side: %v", err)
+		}
+	})
+}
+
+// A slow uplink that is still moving is a live link, even when one socket
+// write takes longer than two keepalive periods and the server says nothing
+// meanwhile. Without counting write progress each reconnect replays the
+// backlog, the probe's echo queues behind it again, and the upload may never
+// finish.
+func TestLivenessSlowUploadKeepsLink(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		srv := etservertest.NewServer(testID, testKey)
+		nw := etservertest.NewNetwork(srv)
+		defer nw.Close()
+		d := etcp.Dialer{NetDialer: throttledDialer{inner: nw, perKiB: time.Second}}
+		conn, err := d.Dial(t.Context(), testAddr, testID, testKey)
+		if err != nil {
+			t.Fatalf("Dial: %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+
+		// 160 KiB at 1 KiB/s: one 64 KiB batch alone takes over a minute, and
+		// the probe from the first quiet period, queued after all of it, is
+		// framed behind tens of KiB of its own batch.
+		const n = 160
+		for i := range n {
+			if err := conn.WritePacket(t.Context(), numbered(i, 1024)); err != nil {
+				t.Fatalf("WritePacket %d: %v", i, err)
+			}
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
+		defer cancel()
+		if err := expectNumbered(ctx, n, srv.Recv); err != nil {
+			t.Fatalf("server side: %v", err)
+		}
+		if got := nw.Dials(); got != 1 {
+			t.Fatalf("Dials() = %d, want 1: a link that keeps accepting data is alive", got)
 		}
 	})
 }
