@@ -25,6 +25,11 @@ const (
 	testAddr = "et.example:2022"
 )
 
+// contextDialer is the dialer a wrapping test NetDialer delegates to.
+type contextDialer interface {
+	DialContext(ctx context.Context, network, address string) (net.Conn, error)
+}
+
 // harness is one session against the fake server over the in-memory network.
 type harness struct {
 	srv  *etservertest.Server

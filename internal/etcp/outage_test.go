@@ -14,9 +14,7 @@ import (
 
 // dialClock records when each dial happens.
 type dialClock struct {
-	inner interface {
-		DialContext(ctx context.Context, network, address string) (net.Conn, error)
-	}
+	inner contextDialer
 	mu    sync.Mutex
 	times []time.Time
 }

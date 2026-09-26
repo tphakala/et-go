@@ -15,9 +15,7 @@ import (
 // time (zero means 125 ms, 8 KiB/s), like a congested uplink, or with
 // downlink set every client-side read instead, like a congested downlink.
 type throttledDialer struct {
-	inner interface {
-		DialContext(ctx context.Context, network, address string) (net.Conn, error)
-	}
+	inner    contextDialer
 	downlink bool
 	perKiB   time.Duration
 }

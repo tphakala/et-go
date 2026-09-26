@@ -177,8 +177,7 @@ func (d *Dialer) newConn(addr, id, passkey string) *Conn {
 		space:      make(chan struct{}, 1),
 	}
 	c.lastProbe = -1
-	c.limit = cmp.Or(d.ReplayLimit, defaultReplayLimit)
-	c.ring.limit = c.limit
+	c.ring.limit = cmp.Or(d.ReplayLimit, defaultReplayLimit)
 	var key [32]byte
 	copy(key[:], passkey)
 	c.out = seal.New(&key, seal.ClientToServer)
