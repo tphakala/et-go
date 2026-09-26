@@ -26,10 +26,11 @@ type Size struct {
 var ErrNotTerminal = errors.New("console: stdin or stdout is not a terminal")
 
 // resizeCheck reads the size once and yields it if it changed since *last.
-// It reports false when the sequence must end: the Console is closed, ctx
-// has ended, or the loop body stopped. select picks at random when a wakeup
-// and the cancellation are both ready, so ctx is checked again before
-// yielding.
+// It reports false when the Console is closed, when ctx has ended with a
+// changed size pending, or when yield stops; an unchanged size or any other
+// Size error reports true, even after ctx ended, and the caller's select on
+// ctx ends the loop. Checking ctx before yielding keeps a change from being
+// yielded after cancellation, whether or not a select raced it.
 func resizeCheck(ctx context.Context, size func() (Size, error), last *Size, yield func(Size) bool) bool {
 	sz, err := size()
 	if errors.Is(err, os.ErrClosed) {

@@ -60,7 +60,7 @@ type Conn struct {
 
 	inbox chan protocol.Packet
 	wake  chan struct{} // cap 1: new outbound data for the link writer
-	space chan struct{} // cap 1: the unsent backlog fell to limit or below
+	space chan struct{} // cap 1: the unsent backlog fell to ReplayLimit (ring.limit) or below
 }
 
 // WritePacket seals p and queues it for delivery. It returns once p is queued,

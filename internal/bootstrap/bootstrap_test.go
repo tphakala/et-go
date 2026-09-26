@@ -397,6 +397,11 @@ func TestRunCancel(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Run() error = %v, want context.DeadlineExceeded", err)
 	}
+	// Without a separate cause, the context error is wrapped once, not
+	// twice as ctx.Err() and a cause equal to it.
+	if n := strings.Count(err.Error(), context.DeadlineExceeded.Error()); n != 1 {
+		t.Fatalf("Run() error = %q names the context error %d times, want once", err, n)
+	}
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("Run() took %v after cancel, want it bounded by waitDelay", elapsed)
 	}

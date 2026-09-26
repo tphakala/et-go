@@ -172,14 +172,20 @@ func TestWriteMessageSingleWrite(t *testing.T) {
 
 // TestWriteMessageAllocs pins that WriteMessage marshals straight into its
 // output buffer: the only allocation is that buffer, not a separate
-// marshalled body copied into it.
+// marshaled body copied into it.
 func TestWriteMessageAllocs(t *testing.T) {
 	req := &protocol.ConnectRequest{}
 	req.SetClientId(string(bytes.Repeat([]byte{'x'}, 1<<10)))
 	req.SetVersion(protocol.Version)
+	var werr error
 	allocs := testing.AllocsPerRun(100, func() {
-		_ = WriteMessage(io.Discard, req)
+		if err := WriteMessage(io.Discard, req); err != nil {
+			werr = err
+		}
 	})
+	if werr != nil {
+		t.Fatalf("WriteMessage: %v", werr)
+	}
 	if allocs > 1 {
 		t.Fatalf("WriteMessage allocated %v times per call, want at most 1", allocs)
 	}

@@ -52,9 +52,12 @@ var (
 	// that is oversized or does not decode: the stream is out of step or
 	// tampered with and cannot be resumed.
 	ErrIntegrity = errors.New("etcp: stream integrity failure")
-	// ErrReplayExceeded reports that the peer needs packets no longer
-	// retained, is ahead of what was sent, or needs a catchup too large to
-	// send in one message.
+	// ErrReplayExceeded reports that the session cannot be resumed: the
+	// peer needs packets no longer retained, is ahead of what was sent, or
+	// needs a catchup too large to send in one message, or more packets
+	// were received than a SequenceHeader's int32 sequence number can
+	// state. A peer position past that range wraps outside the retained
+	// window, so the send direction ends the same way.
 	ErrReplayExceeded = errors.New("etcp: peer needs data beyond the replay window")
 	// ErrRejected reports that the server refused the session: INVALID_KEY
 	// on the first connect, NEW_CLIENT on a redial, or an unknown status.

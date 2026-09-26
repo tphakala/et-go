@@ -12,7 +12,8 @@ import (
 // TestTerminalUserInfoRedacted checks that no fmt verb and no slog handler
 // renders a TerminalUserInfo's passkey, that each rendering says REDACTED,
 // and that the id still appears, for two different ids so a hardcoded id
-// cannot pass.
+// cannot pass. encoding/json, which bypasses Format, is checked only for
+// leaving the passkey out.
 func TestTerminalUserInfoRedacted(t *testing.T) {
 	const passkey = "SECRETPASSKEY0123456789abcdefXYZ"
 	for _, id := range []string{"XXXabcdefghijklm", "YYYnopqrstuvwxyz"} {
