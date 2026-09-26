@@ -11,7 +11,7 @@ import (
 	"github.com/tphakala/et-go/internal/etservertest"
 )
 
-// throttledDialer slows every client-side write to 1 KiB per perKiB of fake
+// throttledDialer slows every client-side write to 1 KiB every perKiB of fake
 // time (zero means 125 ms, 8 KiB/s), like a congested uplink, or with
 // downlink set every client-side read instead, like a congested downlink.
 type throttledDialer struct {

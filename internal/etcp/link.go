@@ -42,6 +42,7 @@ type link struct {
 	delivering atomic.Bool   // the reader is blocked handing a packet to ReadPacket
 }
 
+// newLink returns the shared state for one TCP connection's goroutines.
 func newLink() *link { return &link{alive: make(chan struct{}, 1)} }
 
 // runLink runs a reader, a writer and a liveness watcher on nc until one of
