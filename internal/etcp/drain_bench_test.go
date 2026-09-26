@@ -36,7 +36,7 @@ func BenchmarkDrainBacklog(b *testing.B) {
 		}
 		ctx, cancel := context.WithCancel(b.Context())
 		w := &countingWriter{want: entries * (4 + 18), done: cancel}
-		if err := c.writeLoop(ctx, w); err == nil || ctx.Err() == nil {
+		if err := c.writeLoop(ctx, newLink(), w); err == nil || ctx.Err() == nil {
 			b.Fatalf("writeLoop = %v before draining %d bytes (took %d)", err, w.want, w.n)
 		}
 		c.cancel(nil)

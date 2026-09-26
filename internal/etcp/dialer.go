@@ -69,10 +69,15 @@ type Dialer struct {
 		DialContext(ctx context.Context, network, address string) (net.Conn, error)
 	}
 	// KeepAlive is the quiet period after which a probe is sent; after two
-	// quiet periods the link is declared dead. Only inbound frames count as
-	// proof of life, and the probe queues behind any unsent backlog, so an
-	// upload that takes longer than two periods to drain while the server
-	// sends nothing costs a reconnect (the data survives it). Zero means 5 s
+	// quiet periods the link is declared dead. Inbound frames count as proof
+	// of life, and so do our writes while a probe waits behind them: the
+	// probe queues behind the unsent backlog, so a slow upload while the
+	// server sends nothing would otherwise be taken for a dead link. Writes
+	// are observed in 4 KiB pieces, so an uplink too slow to send one piece
+	// in two periods (under about 400 B/s at the default) still costs a
+	// reconnect, and so does data the kernel has already accepted, which
+	// drains out of sight: a send buffer holding more than two periods'
+	// worth ahead of the probe delays its echo past the deadline. Zero means 5 s
 	// (upstream's maximum, src/base/Headers.hpp:180 at et-v7.0.0); Dial
 	// refuses a negative value or one below 100 ms. Probing starts only
 	// after the first WritePacket, because etserver aborts when a session's
@@ -90,13 +95,17 @@ type Dialer struct {
 	// bound applied separately to the two kinds of retained packets: packets
 	// already written to a socket are trimmed down to it, and WritePacket
 	// blocks while the not-yet-written backlog exceeds it (a single packet
-	// may take the backlog over, and probes are never blocked). While
-	// disconnected the ring can therefore hold about twice ReplayLimit plus
-	// one packet. Packets count as sent once written to the socket, and
-	// written packets are trimmed first, so a window smaller than what the
-	// kernel and the network can hold in flight turns a reconnect into
-	// ErrReplayExceeded; so does a catchup too large for one handshake
-	// message. Small values are for tests only.
+	// may take the backlog over, and probes are never blocked). After a
+	// reconnect, written packets the server has not acknowledged are kept
+	// until it first sends on the new link, up to twice ReplayLimit: the
+	// server counts our catchup only once it has decoded all of it, so a
+	// link lost before then must be able to replay it again. The ring can
+	// therefore hold about three times ReplayLimit plus one packet. Packets
+	// count as sent once written to the socket, and written packets are
+	// trimmed first, so a window smaller than what the kernel and the network
+	// can hold in flight turns a reconnect into ErrReplayExceeded; so does a
+	// catchup too large for one handshake message. Small values are for
+	// tests only.
 	ReplayLimit int
 	// Logger receives connection events. Nil discards them.
 	Logger *slog.Logger

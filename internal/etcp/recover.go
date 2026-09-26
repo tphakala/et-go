@@ -70,7 +70,8 @@ func (c *Conn) reconnect(b *backoff) (net.Conn, [][]byte, error) {
 // the connection cannot buffer what both sides write (at once over net.Pipe,
 // and over TCP once both catchups exceed the socket buffers). Whichever side
 // fails first closes conn to unblock the other; readerErrWins decides which
-// error is reported.
+// error is reported. On success the ring holds our catchup until the server
+// first speaks on the new link (see releaseHold).
 func (c *Conn) recover(conn net.Conn) ([][]byte, error) {
 	var (
 		peer   protocol.SequenceHeader
@@ -109,6 +110,10 @@ func (c *Conn) recover(conn net.Conn) ([][]byte, error) {
 	c.mu.Lock()
 	c.unsent -= c.ring.bytesBetween(c.flushed, snap)
 	c.flushed = snap
+	// The server counts our catchup only once it has decoded the whole
+	// message, so until it speaks on this link the next SequenceHeader may
+	// ask for it again: hold everything from the position it acknowledged.
+	c.ring.held, c.ring.hold = true, int64(peer.GetSequenceNumber())
 	// Trim as writeLoop does after a Write: a link that dies before its
 	// first Write would otherwise leave the catchup in the ring while
 	// WritePacket admits another ReplayLimit.

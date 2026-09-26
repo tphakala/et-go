@@ -297,3 +297,56 @@ func (s *rawServer) open(b []byte) (protocol.Packet, error) {
 	}
 	return protocol.Packet{Header: h, Payload: plain}, nil
 }
+
+// lostCatchup completes the exchange from the client's point of view, then
+// drops the link as if it died before the server counted the client's
+// catchup.
+func (s *rawServer) lostCatchup() {
+	if !s.startRecover() {
+		return
+	}
+	var theirs protocol.CatchupBuffer
+	_ = wire.ReadMessage(s.br, &theirs)
+}
+
+// recoverAll completes the exchange and returns the numbers of the packets
+// in the client's catchup, or nil when the exchange fails.
+func (s *rawServer) recoverAll() []int {
+	if !s.startRecover() {
+		return nil
+	}
+	var theirs protocol.CatchupBuffer
+	if wire.ReadMessage(s.br, &theirs) != nil {
+		return nil
+	}
+	nums := []int{}
+	for _, b := range theirs.GetBuffer() {
+		p, err := s.open(b)
+		if err != nil {
+			return nil
+		}
+		n, err := number(p)
+		if err != nil {
+			return nil
+		}
+		nums = append(nums, n)
+	}
+	return nums
+}
+
+// startRecover answers RETURNING_CLIENT and runs the server's half of the
+// recover exchange up to reading the client's catchup, in upstream's order,
+// claiming to have received nothing and sending an empty catchup.
+func (s *rawServer) startRecover() bool {
+	if s.respond(protocol.ConnectStatus_RETURNING_CLIENT) != nil {
+		return false
+	}
+	if wire.WriteMessage(s.conn, &protocol.SequenceHeader{}) != nil {
+		return false
+	}
+	var mine protocol.SequenceHeader
+	if wire.ReadMessage(s.br, &mine) != nil {
+		return false
+	}
+	return wire.WriteMessage(s.conn, &protocol.CatchupBuffer{}) == nil
+}

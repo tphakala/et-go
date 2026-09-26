@@ -36,6 +36,23 @@ func TestRingTrimKeepsUnsent(t *testing.T) {
 	}
 }
 
+// While held, trim keeps the entries the peer has not acknowledged, but only
+// up to twice limit of written bytes: a server that never catches up must
+// not grow the ring without bound.
+func TestRingTrimHoldCeiling(t *testing.T) {
+	r := filledRing(25, 10, 10) // 100 bytes held, limit 25
+	r.held, r.hold = true, 3
+	r.trim(10, 0)
+	if r.first != 5 || r.bytes != 50 {
+		t.Fatalf("first, bytes = %d, %d; want 5, 50 (trim unacknowledged entries only down to twice the limit)", r.first, r.bytes)
+	}
+	r.hold = 7
+	r.trim(10, 0)
+	if r.first != 7 {
+		t.Fatalf("first = %d, want 7 (acknowledged entries trim down to the limit, not below the hold)", r.first)
+	}
+}
+
 func TestRingSince(t *testing.T) {
 	r := filledRing(25, 10, 10)
 	r.trim(10, 0) // retains 8 and 9

@@ -35,7 +35,7 @@ func TestWriteLoopShortWrite(t *testing.T) {
 		// more data forever.
 		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 		defer cancel()
-		err := c.writeLoop(ctx, shortWriter{})
+		err := c.writeLoop(ctx, newLink(), shortWriter{})
 		if !errors.Is(err, io.ErrShortWrite) {
 			t.Fatalf("writeLoop = %v, want io.ErrShortWrite", err)
 		}
@@ -104,7 +104,7 @@ func TestWriteLoopKeepsWrittenWhileBacklogFull(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 		defer cancel()
 		done := make(chan error, 1)
-		go func() { done <- c.writeLoop(ctx, &backlogWriter{ctx: ctx, c: c}) }()
+		go func() { done <- c.writeLoop(ctx, newLink(), &backlogWriter{ctx: ctx, c: c}) }()
 		synctest.Wait() // the first batch is written, the second is stuck
 
 		c.mu.Lock()
