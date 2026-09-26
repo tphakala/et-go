@@ -58,7 +58,7 @@ var (
 	// were received than a SequenceHeader's int32 sequence number can
 	// state. A peer position past that range wraps outside the retained
 	// window, so the send direction ends the same way.
-	ErrReplayExceeded = errors.New("etcp: peer needs data beyond the replay window")
+	ErrReplayExceeded = errors.New("etcp: session cannot be resumed")
 	// ErrRejected reports that the server refused the session: INVALID_KEY
 	// on the first connect, NEW_CLIENT on a redial, or an unknown status.
 	ErrRejected = errors.New("etcp: server rejected the session")

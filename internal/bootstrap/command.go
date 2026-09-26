@@ -28,9 +28,11 @@ const (
 
 // shellMeta holds the characters a Destination may not contain, and userMeta
 // those a User may not contain, so neither value carries POSIX shell syntax
-// into a ProxyCommand or Match exec that ssh expands %h or %r into. OpenSSH
-// 9.6 added its own hostname and user checks with the same aim (the
-// CVE-2023-51385 fix). MEASURED against OpenSSH_10.0p2 on 2026-09-26 with
+// into a ProxyCommand or Match exec that ssh expands %h or %r into (MEASURED
+// against OpenSSH_10.0p2 on 2026-09-26: both commands received the host and
+// the -l user substituted for %h and %r). OpenSSH 9.6 added its own hostname
+// and user checks with the same aim (the CVE-2023-51385 fix). MEASURED
+// against OpenSSH_10.0p2 on 2026-09-26 with
 // ssh -G: a host with '$' and a user with ';', '(' or '"' or ending in '\'
 // are refused, while the users CORP\alice, host$ and a$b are accepted.
 // userMeta therefore leaves out '$' and '\', which winbind DOMAIN\user names
@@ -64,8 +66,8 @@ func (cfg *Config) validate() error {
 	case strings.HasPrefix(cfg.Destination, "-"):
 		// sshArgs puts "--" before the destination, so ssh no longer reads it
 		// as an option, but ssh still substitutes it for %h in a ProxyCommand
-		// or Match exec, where a command such as "nc %h %p" would take it as
-		// an option.
+		// or Match exec (measured, see shellMeta), where a command such as
+		// "nc %h %p" would take it as an option.
 		return fmt.Errorf("%w: destination %q starts with '-'", ErrInvalidConfig, cfg.Destination)
 	case hasSpaceOrControl(cfg.Destination):
 		return fmt.Errorf("%w: destination %q contains whitespace or control characters", ErrInvalidConfig, cfg.Destination)

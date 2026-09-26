@@ -8,9 +8,9 @@ import (
 )
 
 // TestResizeCheck pins the shared step of both platforms' Resizes loops for
-// each kind of size result (unchanged, changed, closed, another error), with
-// ctx live or ended and the loop body continuing or stopping, without a
-// terminal.
+// the size results it can meet (unchanged, changed, closed, another error),
+// a changed or unchanged size after ctx ended, and a loop body that stops,
+// without a terminal.
 func TestResizeCheck(t *testing.T) {
 	base := Size{Rows: 24, Cols: 80}
 	changed := Size{Rows: 40, Cols: 120}

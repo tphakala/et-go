@@ -80,6 +80,26 @@ func TestRingSince(t *testing.T) {
 	}
 }
 
+// since returns a copy: trim, which clears the slots it drops, leaves the
+// entries since returned intact, as writeRecover relies on after releasing
+// the lock.
+func TestRingSinceIsACopy(t *testing.T) {
+	r := filledRing(20, 5, 10)
+	got, ok := r.since(r.first, r.next())
+	if !ok || len(got) != 5 {
+		t.Fatalf("since(first, next) = %d entries, %v; want 5, true", len(got), ok)
+	}
+	r.trim(r.next(), 0)
+	if r.first == 0 {
+		t.Fatal("trim dropped nothing; the test needs it to drop entries")
+	}
+	for i, e := range got {
+		if want := bytes.Repeat([]byte{byte(i)}, 10); !bytes.Equal(e, want) {
+			t.Fatalf("entry %d after trim = %v, want %v", i, e, want)
+		}
+	}
+}
+
 func TestRingBytesBetweenAndRange(t *testing.T) {
 	r := filledRing(1<<20, 6, 10)
 	if got := r.bytesBetween(2, 5); got != 30 {

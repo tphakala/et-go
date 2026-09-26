@@ -66,10 +66,8 @@ func open(ttyPath string, stdin, stdout *os.File) (*Console, error) {
 	tty, err := os.OpenFile(ttyPath, os.O_RDWR, 0)
 	if err != nil {
 		// err is an *fs.PathError, whose text already names the operation
-		// and the path. Only ENXIO (no controlling terminal) and ENOENT (no
-		// such device node) mean there is no terminal to open; anything
-		// else, such as EACCES, is a plain failure and says so.
-		if errors.Is(err, unix.ENXIO) || errors.Is(err, unix.ENOENT) {
+		// and the path.
+		if noTerminalToOpen(err) {
 			return nil, fmt.Errorf("%w: %w", ErrNotTerminal, err)
 		}
 		return nil, fmt.Errorf("console: %w", err)
@@ -80,6 +78,14 @@ func open(ttyPath string, stdin, stdout *os.File) (*Console, error) {
 		return nil, err
 	}
 	return c, nil
+}
+
+// noTerminalToOpen reports whether a failed open of the controlling terminal
+// means there is none: ENXIO (the process has no controlling terminal) or
+// ENOENT (no such device node). Anything else, such as EACCES, is a plain
+// failure.
+func noTerminalToOpen(err error) bool {
+	return errors.Is(err, unix.ENXIO) || errors.Is(err, unix.ENOENT)
 }
 
 // newConsole wraps an already open terminal file and records its current

@@ -13,8 +13,8 @@ import (
 )
 
 // A receive count past the int32 range cannot be stated in a SequenceHeader:
-// writeRecover must end the Conn with ErrReplayExceeded rather than send a
-// wrapped, negative sequence number.
+// writeRecover must return ErrReplayExceeded, which isFatal treats as the end
+// of the Conn, rather than send a wrapped, negative sequence number.
 func TestWriteRecoverRefusesSequenceBeyondInt32(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var d Dialer

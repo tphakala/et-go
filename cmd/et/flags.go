@@ -133,7 +133,8 @@ func parseArgs(args []string, stderr io.Writer) (*options, error) {
 // carry a port ("[::1]:2022"); a bare IPv6 literal ("::1") has no port. A
 // user or host beginning with "-" is rejected as a usage error: bootstrap
 // refuses it anyway, since ssh substitutes the host and user into a
-// ProxyCommand or Match exec. A ":" with nothing after it is rejected rather
+// ProxyCommand or Match exec (MEASURED against OpenSSH_10.0p2 on 2026-09-26,
+// see bootstrap's shellMeta). A ":" with nothing after it is rejected rather
 // than treated as "no port", and so is an ssh:// URI.
 func parseDestination(s string) (destination, error) {
 	var d destination

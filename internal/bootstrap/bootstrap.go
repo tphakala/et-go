@@ -121,8 +121,8 @@ func Run(ctx context.Context, cfg Config) (Credentials, error) {
 }
 
 // newCommand prepares the ssh command. Its stdin and stderr are the process's
-// own, so password, passphrase and host key prompts reach the user; its
-// stdout is captured in the returned buffer.
+// own, so what ssh asks or reports on them reaches the user; its stdout is
+// captured in the returned buffer.
 func newCommand(ctx context.Context, sshPath string, args []string) (*exec.Cmd, *cappedBuffer) {
 	cmd := exec.CommandContext(ctx, sshPath, args...)
 	cmd.Stdin = os.Stdin
