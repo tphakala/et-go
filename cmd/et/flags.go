@@ -131,11 +131,19 @@ func parseArgs(args []string, stderr io.Writer) (*options, error) {
 
 // parseDestination parses [user@]host[:port]. IPv6 literals need brackets to
 // carry a port ("[::1]:2022"); a bare IPv6 literal ("::1") has no port. A
-// user or host beginning with "-" is rejected, since it would otherwise be
-// read as an option by ssh -G in resolveHost. A ":" with nothing after it is
-// rejected rather than treated as "no port".
+// user or host beginning with "-" is rejected as a usage error: bootstrap
+// refuses it anyway, since ssh substitutes the host and user into a
+// ProxyCommand or Match exec (MEASURED against OpenSSH_10.0p2 on 2026-09-26,
+// see bootstrap's shellMeta). A ":" with nothing after it is rejected rather
+// than treated as "no port", and so is an ssh:// URI.
 func parseDestination(s string) (destination, error) {
 	var d destination
+	// An ssh:// URI would be split at its last '@' into a user such as
+	// "ssh://bob" or taken whole as a host, and its port names sshd's port
+	// where et's host:port names etserver's; refuse it rather than guess.
+	if strings.Contains(s, "://") {
+		return d, fmt.Errorf("ssh:// URIs are not supported, use [user@]host[:port]: %q", s)
+	}
 	if before, after, found := strings.CutLast(s, "@"); found {
 		if before == "" {
 			return d, fmt.Errorf("empty user in destination %q", s)
@@ -178,9 +186,8 @@ func parseDestination(s string) (destination, error) {
 	if d.Host == "" {
 		return d, fmt.Errorf("empty host in destination")
 	}
-	// A host beginning with "-" would otherwise reach "ssh -G <target>" (see
-	// resolveHost in resolve.go) as an option rather than as an argument;
-	// reject it here so the caller gets a usage error instead.
+	// A host beginning with "-" is refused by bootstrap's validation; reject
+	// it here so the caller gets a usage error instead.
 	if strings.HasPrefix(d.Host, "-") {
 		return d, fmt.Errorf("host %q looks like an option in destination %q", d.Host, s)
 	}

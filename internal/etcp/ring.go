@@ -1,7 +1,5 @@
 package etcp
 
-import "slices"
-
 // ring holds sealed, serialized outbound packets by sequence number, for the
 // link writer and for replay after a reconnect. Sequence numbers are
 // contiguous: entries[i] has sequence number first+i.
@@ -52,12 +50,14 @@ func (r *ring) appendRange(dst [][]byte, from, to int64) [][]byte {
 }
 
 // since returns a copy of entries [from, to), or false when from is outside
-// the retained window [first, to] or to is past next().
+// the retained window [first, to] or to is past next(). The copy (appended
+// to a nil slice) lets the caller use it after releasing the lock that
+// guards the ring.
 func (r *ring) since(from, to int64) ([][]byte, bool) {
 	if from < r.first || from > to || to > r.next() {
 		return nil, false
 	}
-	return slices.Clone(r.entries[from-r.first : to-r.first]), true
+	return r.appendRange(nil, from, to), true
 }
 
 // bytesBetween sums the sizes of entries [from, to). The caller guarantees

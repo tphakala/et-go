@@ -31,10 +31,11 @@ func fakeSSH(t *testing.T, body string) string {
 	return path
 }
 
-// TestResolveHostPassesOptions pins the exact ssh -G argument list: each
-// option is its own "-o<opt>" word before -G, as bootstrap passes it to the
-// ssh that starts etterminal. The fake prints its arguments joined by "|" as
-// the hostname, so an option containing a space stays one word.
+// TestResolveHostPassesOptions pins the exact ssh -G argument list, which has
+// the shape bootstrap gives the ssh that starts etterminal: each option as
+// its own "-o<opt>" word, the user as "-l <user>", then "--" before the host.
+// The fake prints its arguments joined by "|" as the hostname, so an option
+// containing a space stays one word.
 func TestResolveHostPassesOptions(t *testing.T) {
 	ssh := fakeSSH(t, `printf 'user x\nhostname '; printf '%s|' "$@"; printf '\n'`)
 	tests := []struct {
@@ -43,13 +44,14 @@ func TestResolveHostPassesOptions(t *testing.T) {
 		opts []string
 		want string
 	}{
-		{name: "no options", want: "-G|box|"},
-		{name: "user", user: "me", want: "-G|me@box|"},
+		{name: "no options", want: "-G|--|box|"},
+		{name: "user", user: "me", want: "-l|me|-G|--|box|"},
+		{name: "user with at", user: "me@corp.example", want: "-l|me@corp.example|-G|--|box|"},
 		{
 			name: "options",
 			user: "me",
 			opts: []string{"HostName=10.0.0.5", "ProxyCommand=nc a b"},
-			want: "-oHostName=10.0.0.5|-oProxyCommand=nc a b|-G|me@box|",
+			want: "-oHostName=10.0.0.5|-oProxyCommand=nc a b|-l|me|-G|--|box|",
 		},
 	}
 	for _, tt := range tests {

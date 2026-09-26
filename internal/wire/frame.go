@@ -35,7 +35,7 @@ func WriteFrame(w io.Writer, frame []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := writeAll(w, buf); err != nil {
+	if err := writeChecked(w, buf); err != nil {
 		return fmt.Errorf("wire: write frame: %w", err)
 	}
 	return nil
@@ -73,9 +73,9 @@ func ReadFrame(r io.Reader, buf []byte) ([]byte, error) {
 	return buf, nil
 }
 
-// writeAll issues one Write of buf and turns a short count without an error
-// into io.ErrShortWrite, as io.Copy does.
-func writeAll(w io.Writer, buf []byte) error {
+// writeChecked issues exactly one Write of buf and turns a short count without
+// an error into io.ErrShortWrite, as io.Copy does.
+func writeChecked(w io.Writer, buf []byte) error {
 	n, err := w.Write(buf)
 	if err == nil && n != len(buf) {
 		err = io.ErrShortWrite

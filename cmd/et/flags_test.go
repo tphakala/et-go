@@ -44,6 +44,10 @@ func TestParseArgsDestination(t *testing.T) {
 		{name: "host looks like an option", args: []string{"--", "-evil"}, wantErr: true},
 		{name: "user looks like an option", args: []string{"--", "-evil@box"}, wantErr: true},
 		{name: "-u looks like an option", args: []string{"-u", "-oProxyCommand=x", "box"}, wantErr: true},
+		{name: "user holding @", args: []string{"me@corp.example@box"}, want: destination{User: "me@corp.example", Host: "box", Port: 2022}},
+		{name: "ssh URI with user", args: []string{"ssh://bob@h1"}, wantErr: true},
+		{name: "user and ssh URI host", args: []string{"bob@ssh://h1:2222"}, wantErr: true},
+		{name: "ssh URI", args: []string{"ssh://h1"}, wantErr: true},
 		{name: "trailing colon", args: []string{"box:"}, wantErr: true},
 		{name: "bracket trailing colon", args: []string{"[::1]:"}, wantErr: true},
 	}

@@ -77,7 +77,11 @@ func NewServer(id, passkey string) *Server {
 // connects twice waits for the first link to settle.
 func (s *Server) Serve(ctx context.Context, c net.Conn) error {
 	defer func() { _ = c.Close() }()
-	stop := context.AfterFunc(ctx, func() { _ = c.Close() })
+	// lctx ends with ctx or when either stream loop fails; closing c then
+	// unblocks the handshake, the recover exchange or the other loop.
+	lctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	stop := context.AfterFunc(lctx, func() { _ = c.Close() })
 	defer stop()
 
 	var req protocol.ConnectRequest
@@ -108,11 +112,6 @@ func (s *Server) Serve(ctx context.Context, c net.Conn) error {
 		}
 		flushed = f
 	}
-
-	lctx, cancel := context.WithCancelCause(ctx)
-	defer cancel(nil)
-	stopClose := context.AfterFunc(lctx, func() { _ = c.Close() })
-	defer stopClose()
 
 	var wg sync.WaitGroup
 	wg.Go(func() { cancel(s.readLoop(c)) })

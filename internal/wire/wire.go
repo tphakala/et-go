@@ -16,7 +16,6 @@ package wire
 import (
 	"errors"
 	"io"
-	"slices"
 )
 
 // Size limits for lengths read from the network.
@@ -42,23 +41,20 @@ var ErrMalformed = errors.New("wire: malformed message")
 // ErrShortPacket reports a serialized packet without its 2-byte header.
 var ErrShortPacket = errors.New("wire: packet shorter than its 2-byte header")
 
-// growChunk is the first allocation for a body that does not fit the
-// caller's buffer; the buffer then doubles as bytes arrive.
+// growChunk is the first read step for a body that does not fit the
+// caller's buffer; the read steps then double as bytes arrive.
 const growChunk = 64 << 10
 
-// bodyErr maps an io.EOF (possibly wrapped) from a body read to
-// io.ErrUnexpectedEOF. A body read happens only after a complete length
-// prefix, so an end of stream there, whether before the first body byte or
-// between two growth chunks, is a broken link, not a clean end of stream.
+// bodyErr classifies a failed body read as headerErr does after one byte: a
+// body read always follows a complete length prefix, so any end of stream
+// there is io.ErrUnexpectedEOF.
 func bodyErr(err error) error {
-	if errors.Is(err, io.EOF) {
-		return io.ErrUnexpectedEOF
-	}
-	return err
+	return headerErr(1, err)
 }
 
-// headerErr classifies a failed length-prefix read that got n bytes. Only a
-// read that got no byte at all is a clean end, reported as a plain io.EOF.
+// headerErr classifies a failed read that got n bytes, of a length prefix
+// or (through bodyErr) of a body. Only a read that got no byte at all is a
+// clean end, reported as a plain io.EOF.
 // io.ReadFull maps only an unwrapped io.EOF after a partial read to
 // io.ErrUnexpectedEOF, so a reader that returns bytes together with a
 // wrapped io.EOF is mapped here.
@@ -73,10 +69,13 @@ func headerErr(n int, err error) error {
 }
 
 // readBody reads exactly n bytes into buf's storage and returns buf[:n],
-// reusing buf's capacity when it is large enough. Otherwise the buffer grows
-// as bytes arrive, starting at growChunk and doubling, so a peer that
-// declares a large length and sends little costs memory in proportion to
-// what it sent, not to what it declared.
+// reusing buf's capacity when it is large enough. Otherwise it reads in
+// steps, the first of min(n, growChunk) bytes and each later one doubling
+// what has arrived, and grows the buffer only when a step does not fit: to
+// twice its old capacity or the step, whichever is larger, but never past
+// max(n, growChunk). A peer that declares a large length and sends little
+// therefore costs memory in proportion to what it sent, not to what it
+// declared.
 func readBody(r io.Reader, buf []byte, n int) ([]byte, error) {
 	if cap(buf) >= n {
 		buf = buf[:n]
@@ -88,7 +87,19 @@ func readBody(r io.Reader, buf []byte, n int) ([]byte, error) {
 	buf = buf[:0]
 	for len(buf) < n {
 		next := min(n, max(2*len(buf), growChunk))
-		buf = slices.Grow(buf, next-len(buf))
+		if cap(buf) < next {
+			// A reused buffer at least doubles, so a reader that passes
+			// its previous frame back grows it a few times rather than
+			// once per larger frame. The capacity is capped at n above
+			// growChunk, where the body ends exactly at n rather than at
+			// append's rounded size; a reused buffer growing past
+			// growChunk still reallocates for each larger body, which
+			// frames carrying one pty read (16 KiB, see MaxFrameSize, plus
+			// packet overhead) never reach.
+			nb := make([]byte, len(buf), min(max(next, 2*cap(buf)), max(n, growChunk)))
+			copy(nb, buf)
+			buf = nb
+		}
 		m, err := io.ReadFull(r, buf[len(buf):next])
 		buf = buf[:len(buf)+m]
 		if err != nil {

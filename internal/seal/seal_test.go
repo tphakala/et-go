@@ -86,6 +86,17 @@ func readGolden(t *testing.T) []goldenRow {
 	return rows
 }
 
+// goldenFor returns the rows for direction dir, keyed by operation index.
+func goldenFor(rows []goldenRow, dir Direction) map[int]goldenRow {
+	want := map[int]goldenRow{}
+	for _, r := range rows {
+		if r.dir == dir {
+			want[r.index] = r
+		}
+	}
+	return want
+}
+
 // TestGolden seals the same sequence as testdata/gen/golden.c and compares
 // nonce and box at the recorded indices, including the carry from byte 0 to
 // byte 1 at operation 256.
@@ -93,12 +104,7 @@ func TestGolden(t *testing.T) {
 	rows := readGolden(t)
 	for _, dir := range []Direction{ClientToServer, ServerToClient} {
 		t.Run(fmt.Sprintf("dir%d", dir), func(t *testing.T) {
-			want := map[int]goldenRow{}
-			for _, r := range rows {
-				if r.dir == dir {
-					want[r.index] = r
-				}
-			}
+			want := goldenFor(rows, dir)
 			s := New(&testKey, dir)
 			checked := 0
 			for i := 1; i <= 257; i++ {
@@ -134,12 +140,7 @@ func TestGoldenOpen(t *testing.T) {
 	rows := readGolden(t)
 	for _, dir := range []Direction{ClientToServer, ServerToClient} {
 		t.Run(fmt.Sprintf("dir%d", dir), func(t *testing.T) {
-			want := map[int]goldenRow{}
-			for _, r := range rows {
-				if r.dir == dir {
-					want[r.index] = r
-				}
-			}
+			want := goldenFor(rows, dir)
 			opener := New(&testKey, dir)
 			sealer := New(&testKey, dir)
 			checked := 0
@@ -167,6 +168,19 @@ func TestGoldenOpen(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestNewInvalidDirection pins that a direction other than the two upstream
+// defines is refused at construction, not left to fail every Open later.
+func TestNewInvalidDirection(t *testing.T) {
+	defer func() {
+		r := recover()
+		msg, _ := r.(string)
+		if !strings.Contains(msg, "invalid direction") {
+			t.Fatalf("New(Direction(2)) recovered %v, want a panic containing %q", r, "invalid direction")
+		}
+	}()
+	New(&testKey, Direction(2))
 }
 
 func TestRoundTrip(t *testing.T) {

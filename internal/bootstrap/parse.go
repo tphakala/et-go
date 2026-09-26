@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"bytes"
 	"fmt"
+	"strings"
 )
 
 // marker precedes the credentials in etterminal's output
@@ -21,24 +22,40 @@ func parseCredentials(out []byte) (Credentials, error) {
 	if !found {
 		return Credentials{}, ErrNoCredentials
 	}
-	id, n := alnumRun(rest)
+	id := alnumRun(rest)
+	n := len(id)
 	if n != idLen || len(rest) == n || rest[n] != '/' {
 		return Credentials{}, fmt.Errorf("%w: malformed id after %q", ErrNoCredentials, marker)
 	}
-	passkey, m := alnumRun(rest[n+1:])
-	if m != passkeyLen {
+	passkey := alnumRun(rest[n+1:])
+	if len(passkey) != passkeyLen {
 		// Do not echo the value: a malformed passkey may still be a real one.
 		return Credentials{}, fmt.Errorf("%w: malformed passkey after %q", ErrNoCredentials, marker)
 	}
 	return NewCredentials(string(id), string(passkey)), nil
 }
 
-// alnumRun returns the leading run of ASCII letters and digits in b and its length.
-func alnumRun(b []byte) (run []byte, n int) {
+// alnumRun returns the leading run of ASCII letters and digits in b.
+func alnumRun(b []byte) []byte {
+	n := 0
 	for n < len(b) && isAlnum(b[n]) {
 		n++
 	}
-	return b[:n], n
+	return b[:n]
+}
+
+// onlyAlnumOr reports whether s is non-empty and every byte of it is an
+// ASCII letter, an ASCII digit or one of the bytes in extra.
+func onlyAlnumOr(s, extra string) bool {
+	if s == "" {
+		return false
+	}
+	for i := range len(s) {
+		if !isAlnum(s[i]) && strings.IndexByte(extra, s[i]) < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func isAlnum(c byte) bool {

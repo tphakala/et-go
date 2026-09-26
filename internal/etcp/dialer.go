@@ -52,10 +52,13 @@ var (
 	// that is oversized or does not decode: the stream is out of step or
 	// tampered with and cannot be resumed.
 	ErrIntegrity = errors.New("etcp: stream integrity failure")
-	// ErrReplayExceeded reports that the peer needs packets no longer
-	// retained, is ahead of what was sent, or needs a catchup too large to
-	// send in one message.
-	ErrReplayExceeded = errors.New("etcp: peer needs data beyond the replay window")
+	// ErrReplayExceeded reports that the session cannot be resumed: the
+	// peer needs packets no longer retained, is ahead of what was sent, or
+	// needs a catchup too large to send in one message, or more packets
+	// were received than a SequenceHeader's int32 sequence number can
+	// state. A peer position past that range wraps outside the retained
+	// window, so the send direction ends the same way.
+	ErrReplayExceeded = errors.New("etcp: session cannot be resumed")
 	// ErrRejected reports that the server refused the session: INVALID_KEY
 	// on the first connect, NEW_CLIENT on a redial, or an unknown status.
 	ErrRejected = errors.New("etcp: server rejected the session")
@@ -177,8 +180,7 @@ func (d *Dialer) newConn(addr, id, passkey string) *Conn {
 		space:      make(chan struct{}, 1),
 	}
 	c.lastProbe = -1
-	c.limit = cmp.Or(d.ReplayLimit, defaultReplayLimit)
-	c.ring.limit = c.limit
+	c.ring.limit = cmp.Or(d.ReplayLimit, defaultReplayLimit)
 	var key [32]byte
 	copy(key[:], passkey)
 	c.out = seal.New(&key, seal.ClientToServer)

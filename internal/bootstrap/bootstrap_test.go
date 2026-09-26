@@ -15,8 +15,10 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // The test binary doubles as a fake ssh. When fakeSSHModeEnv is set, TestMain
@@ -49,7 +51,7 @@ func runFakeSSH(mode string, args []string) int {
 			return 91
 		}
 	}
-	idpasskey := "IDPASSKEY:" + testID + "/" + testPasskey + "\n"
+	idpasskey := marker + testID + "/" + testPasskey + "\n"
 	switch mode {
 	case "ok":
 		fmt.Print("Last login: Thu Sep 24 21:00:00 2026\nWelcome to the server\n" + idpasskey)
@@ -64,7 +66,7 @@ func runFakeSSH(mode string, args []string) int {
 		if m == nil {
 			return 92
 		}
-		fmt.Print("IDPASSKEY:" + m[1] + "/" + m[2] + "\n")
+		fmt.Print(marker + m[1] + "/" + m[2] + "\n")
 		return 0
 	case "notfound":
 		// What bash prints when etterminal is not installed (it goes to stderr).
@@ -76,8 +78,12 @@ func runFakeSSH(mode string, args []string) int {
 	case "noise":
 		fmt.Print("Welcome to the server\n")
 		return 0
+	case "flood":
+		// A login shell that prints more than maxOutput before the marker.
+		fmt.Print(strings.Repeat("x", maxOutput) + idpasskey)
+		return 0
 	case "malformed":
-		fmt.Print("IDPASSKEY:abcd\n")
+		fmt.Print(marker + "abcd\n")
 		return 0
 	case "exit1":
 		// A remote failure with some other status and no output.
@@ -111,6 +117,18 @@ func runFakeSSH(mode string, args []string) int {
 		return 0
 	case "hang":
 		time.Sleep(time.Hour)
+		return 0
+	case "sigterm":
+		// Dies by SIGTERM, as an ssh killed by a signal would. Only the Unix
+		// tests use it: Windows cannot deliver the signal.
+		self, err := os.FindProcess(os.Getpid())
+		if err != nil {
+			return 98
+		}
+		if err := self.Signal(syscall.SIGTERM); err != nil {
+			return 99
+		}
+		time.Sleep(10 * time.Second)
 		return 0
 	case "ok-hang":
 		// Credentials arrive but ssh keeps running until it is cancelled. The
@@ -177,6 +195,16 @@ func readArgv(t *testing.T, path string) []string {
 	return args
 }
 
+// readRemote returns the remote command the fake received: its last argument.
+func readRemote(t *testing.T, path string) string {
+	t.Helper()
+	args := readArgv(t, path)
+	if len(args) == 0 {
+		t.Fatal("fake ssh recorded no arguments")
+	}
+	return args[len(args)-1]
+}
+
 func TestRunSuccess(t *testing.T) {
 	cfg, argvPath := useFakeSSH(t, "ok")
 	var logs bytes.Buffer
@@ -195,12 +223,13 @@ func TestRunSuccess(t *testing.T) {
 	}
 
 	args := readArgv(t, argvPath)
-	if want := []string{"-oBatchMode=yes", "alice@example.test"}; len(args) != 3 || !slices.Equal(args[:2], want) {
+	want := []string{"-oBatchMode=yes", "-l", "alice", "--", "example.test"}
+	if len(args) != len(want)+1 || !slices.Equal(args[:len(want)], want) {
 		t.Fatalf("ssh argv = %q, want %q followed by the remote command", args, want)
 	}
 	remote := regexp.MustCompile(`^echo 'XXX[A-Z2-7]{13}/[A-Z2-7]{32}_xterm-256color' \| etterminal --verbose=0$`)
-	if !remote.MatchString(args[2]) {
-		t.Fatalf("remote command = %q, want it to match %s", args[2], remote)
+	if last := args[len(args)-1]; !remote.MatchString(last) {
+		t.Fatalf("remote command = %q, want it to match %s", last, remote)
 	}
 }
 
@@ -222,9 +251,9 @@ func TestRunWarnsWhenServerDoesNotRegenerate(t *testing.T) {
 	}
 	// The expected values come from the command line the fake received, not
 	// from the Credentials under test, so a broken accessor cannot hide a leak.
-	sent := regexp.MustCompile(`^echo '([A-Z2-7]{16})/([A-Z2-7]{32})_`).FindStringSubmatch(readArgv(t, argvPath)[2])
+	sent := regexp.MustCompile(`^echo '([A-Z2-7]{16})/([A-Z2-7]{32})_`).FindStringSubmatch(readRemote(t, argvPath))
 	if len(sent) != 3 {
-		t.Fatalf("remote command %q does not carry a placeholder id and passkey", readArgv(t, argvPath)[2])
+		t.Fatalf("remote command %q does not carry a placeholder id and passkey", readRemote(t, argvPath))
 	}
 	if got.ID != sent[1] || got.Passkey() != sent[2] {
 		t.Fatalf("Run() = %v with passkey match %v, want the placeholder sent in the remote command", got, got.Passkey() == sent[2])
@@ -311,9 +340,9 @@ func TestRunFailureRedactsPlaceholder(t *testing.T) {
 	if !errors.Is(err, ErrNoCredentials) {
 		t.Fatalf("Run() error = %v, want ErrNoCredentials", err)
 	}
-	sent := regexp.MustCompile(`^echo '([A-Z2-7]{16})/([A-Z2-7]{32})_`).FindStringSubmatch(readArgv(t, argvPath)[2])
+	sent := regexp.MustCompile(`^echo '([A-Z2-7]{16})/([A-Z2-7]{32})_`).FindStringSubmatch(readRemote(t, argvPath))
 	if len(sent) != 3 {
-		t.Fatalf("remote command %q does not carry a placeholder id and passkey", readArgv(t, argvPath)[2])
+		t.Fatalf("remote command %q does not carry a placeholder id and passkey", readRemote(t, argvPath))
 	}
 	if containsPiece([]byte(err.Error()), sent[2]) {
 		t.Fatalf("error quotes passkey material: %v", err)
@@ -368,8 +397,45 @@ func TestRunCancel(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Run() error = %v, want context.DeadlineExceeded", err)
 	}
+	// Without a separate cause, the context error is wrapped once, not
+	// twice as ctx.Err() and a cause equal to it.
+	if n := strings.Count(err.Error(), context.DeadlineExceeded.Error()); n != 1 {
+		t.Fatalf("Run() error = %q names the context error %d times, want once", err, n)
+	}
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("Run() took %v after cancel, want it bounded by waitDelay", elapsed)
+	}
+}
+
+// TestRunCancelWrapsErrAndCause: a caller that sets a cancellation cause can
+// match both it and the context error it came with.
+func TestRunCancelWrapsErrAndCause(t *testing.T) {
+	cfg, _ := useFakeSSH(t, "hang")
+	cause := errors.New("user gave up")
+	ctx, cancel := context.WithTimeoutCause(t.Context(), 200*time.Millisecond, cause)
+	defer cancel()
+
+	_, err := Run(ctx, cfg)
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, cause) {
+		t.Fatalf("Run() error = %v, want it to match both context.DeadlineExceeded and the cause", err)
+	}
+}
+
+// TestRunCancelCauseWrapsCtxErr: a cause that already wraps the context
+// error is reported alone, so the context error is named once, and both
+// still match.
+func TestRunCancelCauseWrapsCtxErr(t *testing.T) {
+	cfg, _ := useFakeSSH(t, "hang")
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cause := fmt.Errorf("gave up: %w", context.Canceled)
+	cancel(cause)
+
+	_, err := Run(ctx, cfg)
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, cause) {
+		t.Fatalf("Run() error = %v, want it to match context.Canceled and the cause", err)
+	}
+	if n := strings.Count(err.Error(), context.Canceled.Error()); n != 1 {
+		t.Fatalf("Run() error = %q names the context error %d times, want once", err, n)
 	}
 }
 
@@ -425,7 +491,7 @@ func TestRunSSHNotOnPath(t *testing.T) {
 }
 
 func TestExcerptCutsAtMarker(t *testing.T) {
-	out := []byte("banner\nIDPASSKEY:" + testID + "/" + testPasskey[:10])
+	out := []byte("banner\n" + marker + testID + "/" + testPasskey[:10])
 	if got := excerpt(out); got != "banner" {
 		t.Fatalf("excerpt() = %q, want %q", got, "banner")
 	}
@@ -460,6 +526,24 @@ func TestRunFindsSSHOnPath(t *testing.T) {
 	}
 }
 
+// TestNewCommandInheritsStdinAndStderr: ssh must share the process's stdin
+// and stderr, or password and host key prompts never reach the user.
+func TestNewCommandInheritsStdinAndStderr(t *testing.T) {
+	cmd, out := newCommand(t.Context(), "ssh", []string{"--", "host", "REMOTE"})
+	if cmd.Stdin != os.Stdin {
+		t.Errorf("Stdin = %v, want os.Stdin", cmd.Stdin)
+	}
+	if cmd.Stderr != os.Stderr {
+		t.Errorf("Stderr = %v, want os.Stderr", cmd.Stderr)
+	}
+	if cmd.Stdout != out || out.max != maxOutput {
+		t.Errorf("Stdout is not the returned buffer capped at maxOutput")
+	}
+	if cmd.WaitDelay != waitDelay || cmd.Cancel == nil {
+		t.Errorf("WaitDelay = %v, Cancel set %v; want %v and a Cancel func", cmd.WaitDelay, cmd.Cancel != nil, waitDelay)
+	}
+}
+
 func TestCappedBuffer(t *testing.T) {
 	c := &cappedBuffer{max: 4}
 	for _, s := range []string{"ab", "cdef", "gh"} {
@@ -469,5 +553,38 @@ func TestCappedBuffer(t *testing.T) {
 	}
 	if got := string(c.Bytes()); got != "abcd" {
 		t.Fatalf("Bytes() = %q, want %q", got, "abcd")
+	}
+	if c.dropped != 4 {
+		t.Fatalf("dropped = %d, want 4 (\"ef\" and \"gh\")", c.dropped)
+	}
+}
+
+// TestRunReportsOverflow: output past maxOutput is dropped, and when that
+// leaves no credentials the error says the cap may have cut them off.
+func TestRunReportsOverflow(t *testing.T) {
+	cfg, _ := useFakeSSH(t, "flood")
+	_, err := Run(t.Context(), cfg)
+	if !errors.Is(err, ErrNoCredentials) {
+		t.Fatalf("Run() error = %v, want ErrNoCredentials", err)
+	}
+	if want := "output exceeded 1 MiB; the credentials may have been cut off"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("Run() error = %q, want it to contain %q", err, want)
+	}
+}
+
+// TestExcerptKeepsRunesWhole: when the excerptLen cut lands inside a
+// multi-byte rune, the excerpt starts at the next rune instead of quoting a
+// stray continuation byte.
+func TestExcerptKeepsRunesWhole(t *testing.T) {
+	const euro = "€" // three bytes in UTF-8
+	tail := strings.Repeat("x", excerptLen-2)
+	// The last excerptLen bytes are the euro sign's two continuation bytes
+	// followed by tail.
+	got := excerpt([]byte("HEAD" + euro + tail))
+	if !utf8.ValidString(got) {
+		t.Fatalf("excerpt() = %q, not valid UTF-8", got)
+	}
+	if want := "..." + tail; got != want {
+		t.Fatalf("excerpt() = %q, want %q", got, want)
 	}
 }

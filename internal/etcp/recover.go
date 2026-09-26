@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"sync"
 	"time"
@@ -117,8 +118,7 @@ func (c *Conn) recover(conn net.Conn) ([][]byte, error) {
 	// Trim as writeLoop does after a Write: a link that dies before its
 	// first Write would otherwise leave the catchup in the ring while
 	// WritePacket admits another ReplayLimit.
-	c.ring.trim(c.flushed, c.unsent)
-	room := c.unsent <= c.limit
+	room := c.releaseLocked()
 	c.mu.Unlock()
 	if room {
 		signal(c.space)
@@ -150,8 +150,18 @@ var maxCatchupSize = wire.MaxMessageSize
 // writeRecover writes our half of the recover exchange and returns the
 // sequence number the new link starts sending from. It fails with
 // ErrReplayExceeded when the peer's position is outside the retained window
-// or our catchup is too large for one message.
+// or our catchup is too large for one message, and also when we have
+// received more packets than SequenceHeader's int32 sequence_number can
+// state (internal/protocol ET.pb.go), rather than send a wrapped negative
+// count. The peer's position needs no such guard: a position truncated to
+// int32 lies at least 2^31 packets below its true value, while the retained
+// window holds at most a few ReplayLimits of bytes, far fewer packets, so
+// ring.since refuses it.
 func (c *Conn) writeRecover(conn net.Conn, gotSeq <-chan error, peer *protocol.SequenceHeader) (int64, error) {
+	if c.recvSeq > math.MaxInt32 {
+		return 0, fmt.Errorf("%w: received %d packets, more than the protocol's int32 sequence number can express",
+			ErrReplayExceeded, c.recvSeq)
+	}
 	mine := &protocol.SequenceHeader{}
 	mine.SetSequenceNumber(int32(c.recvSeq))
 	if err := wire.WriteMessage(conn, mine); err != nil {

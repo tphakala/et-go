@@ -30,7 +30,6 @@ type Conn struct {
 	id        string
 	keepAlive time.Duration
 	probe     protocol.Packet
-	limit     int
 	logger    *slog.Logger
 
 	ctx    context.Context // lifetime of the Conn; its cause is what callers see
@@ -61,7 +60,7 @@ type Conn struct {
 
 	inbox chan protocol.Packet
 	wake  chan struct{} // cap 1: new outbound data for the link writer
-	space chan struct{} // cap 1: the unsent backlog fell to limit or below
+	space chan struct{} // cap 1: the unsent backlog fell to ReplayLimit (ring.limit) or below
 }
 
 // WritePacket seals p and queues it for delivery. It returns once p is queued,
@@ -90,9 +89,9 @@ func (c *Conn) WritePacket(ctx context.Context, p protocol.Packet) error {
 			c.mu.Unlock()
 			return context.Cause(c.ctx)
 		}
-		if c.unsent <= c.limit {
+		if c.unsent <= c.ring.limit {
 			c.enqueueLocked(p)
-			room := c.unsent <= c.limit
+			room := c.unsent <= c.ring.limit
 			c.mu.Unlock()
 			signal(c.wake)
 			if room {
@@ -189,6 +188,14 @@ func (c *Conn) enqueueLocked(p protocol.Packet) {
 	data := c.out.Seal(wire.AppendPacket(buf, true, p.Header, nil), p.Payload)
 	c.ring.push(data)
 	c.unsent += len(data)
+}
+
+// releaseLocked trims the ring after flushed or unsent changed and reports
+// whether the backlog is at or below the limit, so the caller signals space
+// once it drops c.mu. The caller holds c.mu.
+func (c *Conn) releaseLocked() bool {
+	c.ring.trim(c.flushed, c.unsent)
+	return c.unsent <= c.ring.limit
 }
 
 // fail ends the Conn with err and returns it.

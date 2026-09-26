@@ -10,19 +10,25 @@ import (
 
 // WriteMessage writes m as an 8-byte little-endian length followed by its
 // protobuf encoding, in a single Write call. A writer that reports fewer
-// bytes than it was given yields io.ErrShortWrite.
+// bytes than it was given yields io.ErrShortWrite. The message is marshaled
+// straight into the output buffer, after room for the length, so the size
+// limit is checked before anything is allocated.
 func WriteMessage(w io.Writer, m proto.Message) error {
-	body, err := proto.Marshal(m)
+	size := proto.Size(m)
+	if size > MaxMessageSize {
+		return fmt.Errorf("wire: write %T of %d bytes: %w", m, size, ErrTooLarge)
+	}
+	buf, err := proto.MarshalOptions{}.MarshalAppend(make([]byte, 8, 8+size), m)
 	if err != nil {
 		return fmt.Errorf("wire: marshal %T: %w", m, err)
 	}
-	if len(body) > MaxMessageSize {
-		return fmt.Errorf("wire: write %T of %d bytes: %w", m, len(body), ErrTooLarge)
+	// proto.Size is exact for a message nothing else is changing; the
+	// prefix and the limit still use the length actually marshaled.
+	if len(buf)-8 > MaxMessageSize {
+		return fmt.Errorf("wire: write %T of %d bytes: %w", m, len(buf)-8, ErrTooLarge)
 	}
-	buf := make([]byte, 8, 8+len(body))
-	binary.LittleEndian.PutUint64(buf, uint64(len(body)))
-	buf = append(buf, body...)
-	if err := writeAll(w, buf); err != nil {
+	binary.LittleEndian.PutUint64(buf, uint64(len(buf)-8))
+	if err := writeChecked(w, buf); err != nil {
 		return fmt.Errorf("wire: write %T: %w", m, err)
 	}
 	return nil

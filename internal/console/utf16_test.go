@@ -3,6 +3,7 @@ package console
 import (
 	"bytes"
 	"slices"
+	"strings"
 	"testing"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -125,6 +126,26 @@ func TestChunkLen(t *testing.T) {
 	}
 }
 
+// TestChunkLenRejectsSmallLimit checks the precondition: with a limit below
+// 2 a pair at the boundary would leave a chunk of zero units, so chunkLen
+// panics even for input short enough to take the fast path.
+func TestChunkLenRejectsSmallLimit(t *testing.T) {
+	for _, limit := range []int{1, 0, -1} {
+		for _, units := range [][]uint16{nil, {'a'}, {'a', 'b', 'c'}} {
+			func() {
+				defer func() {
+					r := recover()
+					msg, ok := r.(string)
+					if !ok || !strings.Contains(msg, "limit") {
+						t.Errorf("chunkLen(%U, %d) panic = %v, want a string naming the limit", units, limit, r)
+					}
+				}()
+				chunkLen(units, limit)
+			}()
+		}
+	}
+}
+
 // FuzzChunkLen checks that chunking any input covers it exactly, never
 // exceeds the limit, and never separates a surrogate pair.
 func FuzzChunkLen(f *testing.F) {
@@ -155,11 +176,14 @@ func FuzzChunkLen(f *testing.F) {
 }
 
 // FuzzUTF8EncoderSplit checks that splitting the input anywhere never changes
-// the output, and that valid UTF-8 matches the standard library's encoding.
+// the output, and that any input, valid or not, matches the standard
+// library's encoding of the Go []rune conversion once the carried tail is
+// flushed.
 func FuzzUTF8EncoderSplit(f *testing.F) {
 	f.Add([]byte("hello, 世界 😀"), uint8(3))
 	f.Add([]byte("\xe2\x82"), uint8(1))
 	f.Add([]byte("a\xffb\xf0\x9f\x98\x80"), uint8(5))
+	f.Add([]byte("\xf0\x9f\x98a\xed\xa0\x80"), uint8(2)) // truncated 4-byte, UTF-8 encoded surrogate
 	f.Fuzz(func(t *testing.T, in []byte, at uint8) {
 		var whole utf8Encoder
 		want := whole.append(nil, in)
@@ -175,17 +199,27 @@ func FuzzUTF8EncoderSplit(f *testing.F) {
 		if !slices.Equal(parts.carry[:parts.n], whole.carry[:whole.n]) {
 			t.Fatalf("split %d of %q: carry state differs", split, in)
 		}
-		if utf8.Valid(in) && !slices.Equal(want, utf16.Encode([]rune(string(in)))) {
-			t.Fatalf("valid input %q: got %U, want utf16.Encode", in, want)
+		// The carry only ever holds one incomplete sequence, and the Go
+		// []rune conversion turns each byte of that into its own U+FFFD, so
+		// flushing it appends one U+FFFD per carried byte.
+		flushed := got
+		for range parts.n {
+			flushed = append(flushed, utf8.RuneError)
+		}
+		if ref := utf16.Encode([]rune(string(in))); !slices.Equal(flushed, ref) {
+			t.Fatalf("split %d of %q, flushed: got %U, want utf16.Encode %U", split, in, flushed, ref)
 		}
 	})
 }
 
 // FuzzUTF16DecoderSplit is the decoder counterpart: any split gives the same
-// output, and valid UTF-16 round-trips through the standard library.
+// output, and any input, valid or not, matches the standard library's
+// decoding (one U+FFFD per unpaired surrogate) once a carried high
+// surrogate is flushed.
 func FuzzUTF16DecoderSplit(f *testing.F) {
 	f.Add([]byte("h\x00i\x00=\xd8\x00\xde"), uint8(2))
 	f.Add([]byte("\x00\xdc"), uint8(0))
+	f.Add([]byte("=\xd8a\x00=\xd8=\xd8\x00\xde=\xd8"), uint8(1)) // high then ASCII, high then pair, trailing high
 	f.Fuzz(func(t *testing.T, raw []byte, at uint8) {
 		units := make([]uint16, len(raw)/2)
 		for i := range units {
@@ -202,9 +236,14 @@ func FuzzUTF16DecoderSplit(f *testing.F) {
 		if !bytes.Equal(got, want) || parts.high != whole.high {
 			t.Fatalf("split %d of %U: got %q, want %q", split, units, got, want)
 		}
-		runes := utf16.Decode(units)
-		if !slices.Contains(runes, utf8.RuneError) && whole.high == 0 && string(want) != string(runes) {
-			t.Fatalf("valid input %U: got %q, want %q", units, want, string(runes))
+		// A high surrogate still carried at the end is unpaired: flushing
+		// it appends one U+FFFD.
+		flushed := got
+		if parts.high != 0 {
+			flushed = utf8.AppendRune(flushed, utf8.RuneError)
+		}
+		if ref := string(utf16.Decode(units)); string(flushed) != ref {
+			t.Fatalf("split %d of %U, flushed: got %q, want utf16.Decode %q", split, units, flushed, ref)
 		}
 	})
 }

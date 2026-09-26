@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"iter"
 	"os"
 	"path/filepath"
 	"testing"
@@ -98,6 +99,25 @@ func TestOpenWithoutControllingTerminal(t *testing.T) {
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("open error = %v, want the underlying open error kept", err)
+	}
+}
+
+// TestOpenReportsOtherOpenErrorsPlainly covers a tty path that fails to
+// open for a reason other than a missing controlling terminal (here
+// EISDIR): the error keeps its cause and is not ErrNotTerminal, which
+// would misreport it as "not a terminal".
+func TestOpenReportsOtherOpenErrorsPlainly(t *testing.T) {
+	_, slave := openPTY(t)
+	c, err := open(t.TempDir(), slave, slave)
+	if err == nil {
+		_ = c.Close()
+		t.Fatal("open(directory) succeeded, want an error")
+	}
+	if errors.Is(err, ErrNotTerminal) {
+		t.Fatalf("open(directory) error = %v, want an error that is not ErrNotTerminal", err)
+	}
+	if !errors.Is(err, unix.EISDIR) {
+		t.Fatalf("open(directory) error = %v, want the underlying EISDIR kept", err)
 	}
 }
 
@@ -578,15 +598,7 @@ func TestResizesYieldsChangesOnly(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	sizes := make(chan Size, 4)
-	done := make(chan struct{})
-	resizes := c.Resizes(ctx) // baseline 24x80 is taken here
-	go func() {
-		defer close(done)
-		for sz := range resizes {
-			sizes <- sz
-		}
-	}()
+	sizes, done := drainResizes(c.Resizes(ctx)) // baseline 24x80 is taken here
 
 	tick := time.NewTicker(20 * time.Millisecond)
 	defer tick.Stop()
@@ -660,15 +672,7 @@ func TestResizesYieldsChangeBeforeRangingStarts(t *testing.T) {
 	// post-Notify check inside Resizes.
 	setWinsize(t, slave, &unix.Winsize{Row: 50, Col: 120})
 
-	sizes := make(chan Size, 4)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for sz := range resizes {
-			sizes <- sz
-		}
-	}()
-
+	sizes, done := drainResizes(resizes)
 	select {
 	case sz := <-sizes:
 		if sz != (Size{Rows: 50, Cols: 120}) {
@@ -679,6 +683,21 @@ func TestResizesYieldsChangeBeforeRangingStarts(t *testing.T) {
 	}
 	cancel()
 	waitDone(t, done, "Resizes after cancel")
+}
+
+// drainResizes ranges over resizes on its own goroutine, sending each size
+// yielded to sizes, and closes done when the range statement finishes.
+// sizes is buffered so a test can count yields after the range ended.
+func drainResizes(resizes iter.Seq[Size]) (sizes <-chan Size, done <-chan struct{}) {
+	out := make(chan Size, 4)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		for sz := range resizes {
+			out <- sz
+		}
+	}()
+	return out, finished
 }
 
 // waitDone waits, bounded, for a consumer goroutine to close done.
@@ -705,14 +724,7 @@ func TestResizesStopsAfterCancel(t *testing.T) {
 	setWinsize(t, slave, &unix.Winsize{Row: 50, Col: 120})
 	cancel()
 
-	sizes := make(chan Size, 4)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for sz := range resizes {
-			sizes <- sz
-		}
-	}()
+	sizes, done := drainResizes(resizes)
 	waitDone(t, done, "cancelled Resizes")
 	if len(sizes) != 0 {
 		t.Fatalf("Resizes yielded %+v after its context ended", <-sizes)
@@ -834,14 +846,7 @@ func TestResizesEndsAfterClose(t *testing.T) {
 				}
 			}
 
-			sizes := make(chan Size, 4)
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				for sz := range resizes {
-					sizes <- sz
-				}
-			}()
+			sizes, done := drainResizes(resizes)
 
 			if tc.inLoop {
 				// Signal an unchanged size for 300 ms so the iterator has

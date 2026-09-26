@@ -17,7 +17,7 @@ func blockedConn(t *testing.T) *Conn {
 	var d Dialer
 	c := d.newConn("et.example:2022", "XXXtestclient001", strings.Repeat("k", 32))
 	c.mu.Lock()
-	c.unsent = c.limit + 1
+	c.unsent = c.ring.limit + 1
 	c.mu.Unlock()
 	return c
 }
