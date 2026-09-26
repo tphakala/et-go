@@ -134,9 +134,15 @@ func parseArgs(args []string, stderr io.Writer) (*options, error) {
 // user or host beginning with "-" is rejected as a usage error: bootstrap
 // refuses it anyway, since ssh substitutes the host and user into a
 // ProxyCommand or Match exec. A ":" with nothing after it is rejected rather
-// than treated as "no port".
+// than treated as "no port", and so is an ssh:// URI.
 func parseDestination(s string) (destination, error) {
 	var d destination
+	// An ssh:// URI would be split at its last '@' into a user such as
+	// "ssh://bob" or taken whole as a host, and its port names sshd's port
+	// where et's host:port names etserver's; refuse it rather than guess.
+	if strings.Contains(s, "://") {
+		return d, fmt.Errorf("ssh:// URIs are not supported, use [user@]host[:port]: %q", s)
+	}
 	if before, after, found := strings.CutLast(s, "@"); found {
 		if before == "" {
 			return d, fmt.Errorf("empty user in destination %q", s)
