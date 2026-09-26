@@ -41,8 +41,15 @@ const (
 // accepts the user a;b and the host h$x, so on that client these sets are
 // the only check. They model a POSIX shell; which interpreter the Windows
 // client runs a ProxyCommand with is not measured.
+//
+// shellMeta also holds the glob characters, which a shell would expand
+// against local file names: no host name contains them, and ssh keeps the
+// brackets of a bracketed address as part of the host name (MEASURED against
+// OpenSSH_10.0p2 on 2026-09-26: "ssh -G -- [::1]" gives hostname "[::1]"), so
+// an IPv6 destination is passed bare. userMeta leaves them out, as OpenSSH
+// accepts them in a user name.
 const (
-	shellMeta = "'`\"$\\;&<>|(){}"
+	shellMeta = "'`\"$\\;&<>|(){}*?[]"
 	userMeta  = "'`\";&<>|(){}"
 )
 

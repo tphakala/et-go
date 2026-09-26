@@ -28,7 +28,8 @@ func TestValidate(t *testing.T) {
 		{"destination is an option", func(c *Config) { c.Destination = "-oProxyCommand=evil" }, true},
 		{"destination with space", func(c *Config) { c.Destination = "a b" }, true},
 		{"destination with control", func(c *Config) { c.Destination = "host\x01" }, true},
-		{"bracketed IPv6", func(c *Config) { c.Destination = "[::1]" }, false},
+		{"IPv6", func(c *Config) { c.Destination = "::1" }, false},
+		{"IPv6 with zone", func(c *Config) { c.Destination = "fe80::1%eth0" }, false},
 		{"ssh URI with port", func(c *Config) { c.Destination = "ssh://host:2222" }, false},
 		{"dotted alias", func(c *Config) { c.Destination = "my-host.example" }, false},
 		{"underscore host", func(c *Config) { c.Destination = "host_1" }, false},
@@ -51,7 +52,7 @@ func TestValidate(t *testing.T) {
 	// Spelled out rather than taken from shellMeta and userMeta, so dropping
 	// a character from a production set turns a row red.
 	const (
-		wantDestMeta = "'`\"$\\;&<>|(){}"
+		wantDestMeta = "'`\"$\\;&<>|(){}*?[]"
 		wantUserMeta = "'`\";&<>|(){}"
 	)
 	metaCases := make([]validateCase, 0, len(wantDestMeta)+len(wantUserMeta))
