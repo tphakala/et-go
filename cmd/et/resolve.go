@@ -20,20 +20,20 @@ const (
 // resolveHost returns the host name OpenSSH would connect to for this
 // destination, so an ssh_config alias ("Host box / HostName 10.0.0.5") works
 // for the etserver TCP connection too. "ssh -G" prints the effective client
-// configuration without connecting. Each of opts is passed as "-o<opt>", the
-// same way bootstrap passes it to the ssh that starts etterminal, so an
-// option such as HostName resolves here too. On any failure it returns host
-// unchanged.
+// configuration without connecting. The arguments have the shape bootstrap
+// gives the ssh that starts etterminal: each of opts as "-o<opt>", the user
+// as "-l <user>", and "--" before the host, so an option such as HostName
+// and a user name holding '@' resolve as they do there.
+// On any failure it returns host unchanged.
 func resolveHost(ctx context.Context, sshPath, user, host string, opts []string) string {
-	target := host
-	if user != "" {
-		target = user + "@" + host
-	}
-	args := make([]string, 0, len(opts)+2)
+	args := make([]string, 0, len(opts)+5)
 	for _, opt := range opts {
 		args = append(args, "-o"+opt)
 	}
-	args = append(args, "-G", target)
+	if user != "" {
+		args = append(args, "-l", user)
+	}
+	args = append(args, "-G", "--", host)
 	ctx, cancel := context.WithTimeout(ctx, resolveTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, sshPath, args...)
