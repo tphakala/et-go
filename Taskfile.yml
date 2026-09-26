@@ -1,0 +1,151 @@
+# https://taskfile.dev
+version: '3'
+
+vars:
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+  LDFLAGS: -s -w -X main.version={{.VERSION}}
+  # The release targets, as in .goreleaser.yaml.
+  TARGETS: linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
+
+env:
+  # The client must stay pure Go: every target builds without cgo.
+  CGO_ENABLED: '0'
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  build:
+    desc: Build et for the host platform, version stamped (bin/et)
+    cmds:
+      - go build -trimpath -ldflags "{{.LDFLAGS}}" -o bin/et{{exeExt}} ./cmd/et
+
+  build:all:
+    desc: Cross-build every release target (bin/et-<os>-<arch>)
+    cmds:
+      - for: { var: TARGETS, split: ' ' }
+        cmd: |
+          os={{splitList "/" .ITEM | first}}
+          arch={{splitList "/" .ITEM | last}}
+          ext=""; [ "$os" = windows ] && ext=.exe
+          GOOS=$os GOARCH=$arch go build -trimpath -ldflags "{{.LDFLAGS}}" -o "bin/et-$os-$arch$ext" ./cmd/et
+
+  test:
+    desc: Run all tests
+    cmds:
+      - go test ./...
+
+  test:race:
+    desc: Run tests with the race detector
+    # The race detector needs cgo.
+    env:
+      CGO_ENABLED: '1'
+    cmds:
+      - go test -race ./...
+
+  test:e2e:
+    desc: Run the end-to-end suite (needs etserver on 127.0.0.1:2022 and ssh localhost with key auth)
+    cmds:
+      - go test -tags e2e -count=1 ./test/e2e/
+
+  vet:
+    desc: Run go vet on the host, every release target, the e2e suite and both wasm targets
+    cmds:
+      - go vet ./...
+      - for: { var: TARGETS, split: ' ' }
+        cmd: GOOS={{splitList "/" .ITEM | first}} GOARCH={{splitList "/" .ITEM | last}} go vet ./...
+      - go vet -tags e2e ./test/e2e/
+      - task: wasm
+
+  wasm:
+    desc: Build and vet every package except cmd/et for js/wasm and wasip1/wasm
+    cmds:
+      - for: [js, wasip1]
+        cmd: |
+          pkgs=$(go list ./... | grep -v -x -e 'github.com/tphakala/et-go/cmd/et')
+          GOOS={{.ITEM}} GOARCH=wasm go build $pkgs
+          GOOS={{.ITEM}} GOARCH=wasm go vet $pkgs
+
+  lint:
+    desc: Run golangci-lint for Linux and Windows, and check the ruleguard rules compile
+    cmds:
+      # A broken rule otherwise compiles clean and silently disables ruleguard.
+      - go build -tags ruleguard ./rules/
+      - golangci-lint run ./...
+      - GOOS=windows golangci-lint run ./...
+
+  fix:
+    desc: Fail if a go fix modernizer has a suggestion
+    cmds:
+      - go fix -diff ./...
+      - GOOS=windows go fix -diff ./...
+      - go fix -diff -tags e2e ./test/e2e/
+
+  fmt:
+    desc: Fail if any Go file is not gofmt-formatted
+    cmds:
+      - |
+        files=$(gofmt -l .)
+        if [ -n "$files" ]; then
+          echo "These files are not gofmt-formatted (run: gofmt -w .):"
+          echo "$files"
+          exit 1
+        fi
+
+  tidy:
+    desc: Tidy and verify go.mod
+    cmds:
+      - go mod tidy
+      - go mod verify
+
+  generate:
+    desc: Regenerate the protocol code (needs protoc 3.21.12)
+    cmds:
+      - go generate ./internal/protocol
+
+  generate:verify:
+    desc: Fail if the generated protocol code is stale (needs protoc 3.21.12)
+    cmds:
+      - task: generate
+      - |
+        out=$(git status --porcelain -- internal/protocol)
+        if [ -n "$out" ]; then
+          echo "$out"
+          echo "internal/protocol is out of date; run: task generate"
+          exit 1
+        fi
+
+  vuln:
+    desc: Run govulncheck
+    cmds:
+      - go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  agents:size:
+    desc: Fail if any AGENTS.md exceeds 20 KB
+    cmds:
+      # agy silently truncates each instruction file at about 24 KB, dropping
+      # whatever rules sit at the tail. The 20 KB cap leaves headroom.
+      - |
+        fail=0
+        for f in $(git ls-files --cached --others --exclude-standard '*AGENTS.md'); do
+          size=$(wc -c < "$f")
+          if [ "$size" -gt 20480 ]; then
+            echo "$f is $size bytes (limit 20480); split it into module AGENTS.md files"
+            fail=1
+          fi
+        done
+        exit $fail
+
+  check:
+    desc: Full local gate (agents size, cross builds, vet, wasm, lint, go fix, fmt, race tests)
+    cmds:
+      - task: agents:size
+      - task: build:all
+      - task: vet
+      - task: lint
+      - task: fix
+      - task: fmt
+      - task: test:race

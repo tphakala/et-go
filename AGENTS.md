@@ -31,6 +31,9 @@ Update this table when a package is added.
 
 ## Build, test, lint
 
+`task check` (Taskfile.yml) runs the local gate: cross builds of every release target, vet (including
+e2e and wasm), both lint passes, `go fix -diff`, gofmt and race tests. The raw commands:
+
 ```bash
 go build ./...
 go vet ./...
