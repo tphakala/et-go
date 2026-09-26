@@ -421,6 +421,24 @@ func TestRunCancelWrapsErrAndCause(t *testing.T) {
 	}
 }
 
+// TestRunCancelCauseWrapsCtxErr: a cause that already wraps the context
+// error is reported alone, so the context error is named once, and both
+// still match.
+func TestRunCancelCauseWrapsCtxErr(t *testing.T) {
+	cfg, _ := useFakeSSH(t, "hang")
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cause := fmt.Errorf("gave up: %w", context.Canceled)
+	cancel(cause)
+
+	_, err := Run(ctx, cfg)
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, cause) {
+		t.Fatalf("Run() error = %v, want it to match context.Canceled and the cause", err)
+	}
+	if n := strings.Count(err.Error(), context.Canceled.Error()); n != 1 {
+		t.Fatalf("Run() error = %q names the context error %d times, want once", err, n)
+	}
+}
+
 // TestRunCancelWinsOverCredentials: when the caller cancels while ssh is still
 // running, Run reports the cancellation even if the credentials already
 // arrived, so a Ctrl+C during bootstrap never goes on to connect.

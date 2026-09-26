@@ -93,12 +93,14 @@ func Run(ctx context.Context, cfg Config) (Credentials, error) {
 		return creds, nil
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		// Wrap both, so a caller can match context.Canceled or
-		// DeadlineExceeded as well as a cause it set.
-		if cause := context.Cause(ctx); !errors.Is(ctxErr, cause) {
-			return Credentials{}, fmt.Errorf("bootstrap: ssh interrupted: %w: %w", ctxErr, cause)
+		// A caller can match context.Canceled or DeadlineExceeded as well
+		// as a cause it set. A cause that already wraps the context error
+		// (or is it) is reported alone, so the text names it once.
+		cause := context.Cause(ctx)
+		if errors.Is(cause, ctxErr) {
+			return Credentials{}, fmt.Errorf("bootstrap: ssh interrupted: %w", cause)
 		}
-		return Credentials{}, fmt.Errorf("bootstrap: ssh interrupted: %w", ctxErr)
+		return Credentials{}, fmt.Errorf("bootstrap: ssh interrupted: %w: %w", ctxErr, cause)
 	}
 	exitErr, isExit := errors.AsType[*exec.ExitError](runErr)
 	// ErrWaitDelay means ssh exited 0 but a descendant kept its stdout open
