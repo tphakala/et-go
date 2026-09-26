@@ -26,16 +26,23 @@ const (
 	terminalPathExtra = "._/~-"
 )
 
-// shellMeta holds the characters a Destination or User may not contain, so
-// neither value can carry shell syntax into whatever ssh or its configuration
-// does with it. OpenSSH 9.6 added its own hostname and user checks with the
-// same aim (the CVE-2023-51385 fix): MEASURED against OpenSSH_10.0p2 on 2026-09-26, "ssh -G -l 'a;b' h6.example"
-// fails with "remote username contains invalid characters" and
-// "ssh -G 'h$x.example'" with "hostname contains invalid characters". The set
-// here covers the metacharacters in those measured examples and more, and it
-// matters most where ssh has no such check: the in-box Windows OpenSSH
-// measured on 2026-09-26 was 9.5p2.
-const shellMeta = "'`\"$\\;&<>|(){}"
+// shellMeta holds the characters a Destination may not contain, and userMeta
+// those a User may not contain, so neither value carries POSIX shell syntax
+// into a ProxyCommand or Match exec that ssh expands %h or %r into. OpenSSH
+// 9.6 added its own hostname and user checks with the same aim (the
+// CVE-2023-51385 fix). MEASURED against OpenSSH_10.0p2 on 2026-09-26 with
+// ssh -G: a host with '$' and a user with ';', '(' or '"' or ending in '\'
+// are refused, while the users CORP\alice, host$ and a$b are accepted.
+// userMeta therefore leaves out '$' and '\', which winbind DOMAIN\user names
+// and Samba machine accounts use, and validate refuses a trailing '\'
+// instead. MEASURED against OpenSSH_for_Windows_9.5p2 on 2026-09-26: ssh -G
+// accepts the user a;b and the host h$x, so on that client these sets are
+// the only check. They model a POSIX shell; which interpreter the Windows
+// client runs a ProxyCommand with is not measured.
+const (
+	shellMeta = "'`\"$\\;&<>|(){}"
+	userMeta  = "'`\";&<>|(){}"
+)
 
 // applyDefaults fills in empty optional fields. Run calls it on its own copy
 // of the caller's Config.
@@ -55,16 +62,23 @@ func (cfg *Config) validate() error {
 	case cfg.Destination == "":
 		return fmt.Errorf("%w: destination is empty", ErrInvalidConfig)
 	case strings.HasPrefix(cfg.Destination, "-"):
-		// ssh would parse it as an option.
+		// sshArgs puts "--" before the destination, so ssh no longer reads it
+		// as an option, but ssh still substitutes it for %h in a ProxyCommand
+		// or Match exec, where a command such as "nc %h %p" would take it as
+		// an option.
 		return fmt.Errorf("%w: destination %q starts with '-'", ErrInvalidConfig, cfg.Destination)
 	case hasSpaceOrControl(cfg.Destination):
 		return fmt.Errorf("%w: destination %q contains whitespace or control characters", ErrInvalidConfig, cfg.Destination)
 	case strings.ContainsAny(cfg.Destination, shellMeta):
 		return fmt.Errorf("%w: destination %q contains a shell metacharacter", ErrInvalidConfig, cfg.Destination)
-	case strings.HasPrefix(cfg.User, "-"), hasSpaceOrControl(cfg.User), strings.ContainsAny(cfg.User, shellMeta):
+	case strings.HasPrefix(cfg.User, "-"), hasSpaceOrControl(cfg.User):
 		// '@' is allowed: the user goes to ssh as its own -l argument, so
 		// "alice@corp.example" stays one user name.
 		return fmt.Errorf("%w: user %q is not a valid user name", ErrInvalidConfig, cfg.User)
+	case strings.ContainsAny(cfg.User, userMeta):
+		return fmt.Errorf("%w: user %q contains a shell metacharacter", ErrInvalidConfig, cfg.User)
+	case strings.HasSuffix(cfg.User, `\`):
+		return fmt.Errorf("%w: user %q ends in a backslash", ErrInvalidConfig, cfg.User)
 	case cfg.User != "" && strings.ContainsRune(cfg.Destination, '@'):
 		// ssh would silently let -l win over the user in the destination
 		// (MEASURED against OpenSSH_10.0p2 on 2026-09-26: "ssh -G -l alice

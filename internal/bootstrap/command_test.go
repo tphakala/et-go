@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -47,17 +48,32 @@ func TestValidate(t *testing.T) {
 		{"empty ssh option", func(c *Config) { c.SSHOptions = []string{""} }, true},
 		{"ssh option with newline", func(c *Config) { c.SSHOptions = []string{"A=b\nc"} }, true},
 	}
-	// Spelled out rather than taken from shellMeta, so dropping a character
-	// from the production set turns a row red.
-	const meta = "'`\"$\\;&<>|(){}"
-	metaCases := make([]validateCase, 0, 2*len(meta))
-	for _, r := range meta {
+	// Spelled out rather than taken from shellMeta and userMeta, so dropping
+	// a character from a production set turns a row red.
+	const (
+		wantDestMeta = "'`\"$\\;&<>|(){}"
+		wantUserMeta = "'`\";&<>|(){}"
+	)
+	metaCases := make([]validateCase, 0, len(wantDestMeta)+len(wantUserMeta))
+	for _, r := range wantDestMeta {
 		metaCases = append(metaCases,
-			validateCase{"destination with " + string(r), func(c *Config) { c.Destination = "h" + string(r) + "x.example" }, true},
-			validateCase{"user with " + string(r), func(c *Config) { c.User = "a" + string(r) + "b" }, true},
-		)
+			validateCase{"destination with " + string(r), func(c *Config) { c.Destination = "h" + string(r) + "x.example" }, true})
 	}
-	for _, tt := range slices.Concat(tests, metaCases) {
+	for _, r := range wantUserMeta {
+		metaCases = append(metaCases,
+			validateCase{"user with " + string(r), func(c *Config) { c.User = "a" + string(r) + "b" }, true})
+	}
+	// User names OpenSSH accepts and main accepted: a winbind DOMAIN\user and
+	// a Samba machine account. A trailing backslash is refused, as OpenSSH
+	// refuses it.
+	metaCases = append(metaCases,
+		validateCase{"winbind user", func(c *Config) { c.User = `CORP\alice` }, false},
+		validateCase{"machine account user", func(c *Config) { c.User = "host$" }, false},
+		validateCase{"user with dollar inside", func(c *Config) { c.User = "a$b" }, false},
+		validateCase{"user ending in backslash", func(c *Config) { c.User = `alice\` }, true},
+	)
+	for i, tt := range slices.Concat(tests, metaCases) {
+		isMeta := i >= len(tests)
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := valid
 			cfg.SSHOptions = slices.Clone(valid.SSHOptions)
@@ -68,6 +84,12 @@ func TestValidate(t *testing.T) {
 			}
 			if err != nil && !errors.Is(err, ErrInvalidConfig) {
 				t.Fatalf("validate() = %v, want it to wrap ErrInvalidConfig", err)
+			}
+			// A metacharacter row must fail for the metacharacter, not for
+			// some other rule that happens to reject the same value.
+			if isMeta && tt.wantErr &&
+				!strings.Contains(err.Error(), "shell metacharacter") && !strings.Contains(err.Error(), "backslash") {
+				t.Fatalf("validate() = %v, want the metacharacter reason", err)
 			}
 		})
 	}
