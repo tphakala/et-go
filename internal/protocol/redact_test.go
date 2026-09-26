@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -45,6 +46,22 @@ func TestTerminalUserInfoRedacted(t *testing.T) {
 			check(t, buf.String())
 		})
 	}
+
+	// encoding/json does not go through Format, and opaque messages hide
+	// their fields from it (MEASURED 2026-09-26: the output is only
+	// XXX_ bookkeeping fields). Pin that the passkey stays out.
+	t.Run("encoding/json", func(t *testing.T) {
+		u := &TerminalUserInfo{}
+		u.SetId("XXXabcdefghijklm")
+		u.SetPasskey(passkey)
+		b, err := json.Marshal(u)
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		if strings.Contains(string(b), passkey) {
+			t.Errorf("json.Marshal output %s contains the passkey", b)
+		}
+	})
 
 	t.Run("nil", func(t *testing.T) {
 		var u *TerminalUserInfo

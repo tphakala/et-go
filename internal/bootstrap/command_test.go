@@ -10,11 +10,12 @@ func TestValidate(t *testing.T) {
 	valid := Config{Destination: "example.test"}
 	valid.applyDefaults()
 
-	tests := []struct {
+	type validateCase struct {
 		name    string
 		mutate  func(*Config)
 		wantErr bool
-	}{
+	}
+	tests := []validateCase{
 		{"defaults", func(*Config) {}, false},
 		{"alias with dots and dashes", func(c *Config) { c.Destination = "my-host.lan" }, false},
 		{"user", func(c *Config) { c.User = "alice" }, false},
@@ -26,7 +27,12 @@ func TestValidate(t *testing.T) {
 		{"destination is an option", func(c *Config) { c.Destination = "-oProxyCommand=evil" }, true},
 		{"destination with space", func(c *Config) { c.Destination = "a b" }, true},
 		{"destination with control", func(c *Config) { c.Destination = "host\x01" }, true},
-		{"user with at", func(c *Config) { c.User = "a@b" }, true},
+		{"bracketed IPv6", func(c *Config) { c.Destination = "[::1]" }, false},
+		{"ssh URI with port", func(c *Config) { c.Destination = "ssh://host:2222" }, false},
+		{"dotted alias", func(c *Config) { c.Destination = "my-host.example" }, false},
+		{"underscore host", func(c *Config) { c.Destination = "host_1" }, false},
+		{"user with at", func(c *Config) { c.User = "alice@corp.example" }, false},
+		{"user with dot dash underscore", func(c *Config) { c.User = "a.b-c_d" }, false},
 		{"user with space", func(c *Config) { c.User = "a b" }, true},
 		{"user with control", func(c *Config) { c.User = "a\x01" }, true},
 		{"user is an option", func(c *Config) { c.User = "-x" }, true},
@@ -41,7 +47,17 @@ func TestValidate(t *testing.T) {
 		{"empty ssh option", func(c *Config) { c.SSHOptions = []string{""} }, true},
 		{"ssh option with newline", func(c *Config) { c.SSHOptions = []string{"A=b\nc"} }, true},
 	}
-	for _, tt := range tests {
+	// Spelled out rather than taken from shellMeta, so dropping a character
+	// from the production set turns a row red.
+	const meta = "'`\"$\\;&<>|(){}"
+	metaCases := make([]validateCase, 0, 2*len(meta))
+	for _, r := range meta {
+		metaCases = append(metaCases,
+			validateCase{"destination with " + string(r), func(c *Config) { c.Destination = "h" + string(r) + "x.example" }, true},
+			validateCase{"user with " + string(r), func(c *Config) { c.User = "a" + string(r) + "b" }, true},
+		)
+	}
+	for _, tt := range slices.Concat(tests, metaCases) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := valid
 			cfg.SSHOptions = slices.Clone(valid.SSHOptions)
@@ -87,12 +103,22 @@ func TestSSHArgs(t *testing.T) {
 		{
 			name: "destination only",
 			cfg:  Config{Destination: "host"},
-			want: []string{"host", "REMOTE"},
+			want: []string{"--", "host", "REMOTE"},
 		},
 		{
 			name: "user and options",
 			cfg:  Config{Destination: "host", User: "alice", SSHOptions: []string{"BatchMode=yes", "Port=2222"}},
-			want: []string{"-oBatchMode=yes", "-oPort=2222", "alice@host", "REMOTE"},
+			want: []string{"-oBatchMode=yes", "-oPort=2222", "-l", "alice", "--", "host", "REMOTE"},
+		},
+		{
+			name: "user with at",
+			cfg:  Config{Destination: "host", User: "alice@corp.example"},
+			want: []string{"-l", "alice@corp.example", "--", "host", "REMOTE"},
+		},
+		{
+			name: "user and ssh URI",
+			cfg:  Config{Destination: "ssh://host:2222", User: "bob"},
+			want: []string{"-l", "bob", "--", "ssh://host:2222", "REMOTE"},
 		},
 	}
 	for _, tt := range tests {

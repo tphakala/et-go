@@ -7,10 +7,29 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
+
+// TestRunReportsKillingSignal: an ssh that dies by a signal has no exit
+// status, so the error names the signal instead of "exited with status -1".
+func TestRunReportsKillingSignal(t *testing.T) {
+	cfg, _ := useFakeSSH(t, "sigterm")
+	_, err := Run(t.Context(), cfg)
+	if !errors.Is(err, ErrNoCredentials) {
+		t.Fatalf("Run() error = %v, want ErrNoCredentials", err)
+	}
+	want := "ssh was killed by signal " + strconv.Itoa(int(syscall.SIGTERM)) + " (" + syscall.SIGTERM.String() + ")"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("Run() error = %q, want it to contain %q", err, want)
+	}
+	if strings.Contains(err.Error(), "status -1") {
+		t.Fatalf("Run() error = %q reports a status for a signalled ssh", err)
+	}
+}
 
 // TestRunCancelInterruptsThenKills pins both halves of Run's cancellation: ssh
 // is sent os.Interrupt first (so it can restore the terminal), and a child that
