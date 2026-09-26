@@ -80,8 +80,9 @@ type Console struct {
 	pendingOff int
 
 	// Writer-owned state.
-	enc utf8Encoder
-	buf []uint16
+	enc          utf8Encoder
+	buf          []uint16
+	unitsWritten uint32 // units the last console write reported
 }
 
 // Open returns the console attached to stdin and stdout. It returns an error
@@ -319,10 +320,14 @@ func (c *Console) Write(p []byte) (int, error) {
 	c.buf = c.enc.append(c.buf[:0], p)
 	for units := c.buf; len(units) > 0; {
 		chunk := units[:chunkLen(units, writeUnits)]
-		var n uint32
-		if err := write(c.out, &chunk[0], uint32(len(chunk)), &n, nil); err != nil {
+		// The count goes into a field, as in Read: a local whose address
+		// is passed to the write func value is moved to the heap, one
+		// allocation per console write (go build -gcflags=-m, go1.27).
+		c.unitsWritten = 0
+		if err := write(c.out, &chunk[0], uint32(len(chunk)), &c.unitsWritten, nil); err != nil {
 			return 0, fmt.Errorf("console: write: %w", err)
 		}
+		n := c.unitsWritten
 		if n == 0 {
 			return 0, io.ErrShortWrite
 		}

@@ -982,6 +982,29 @@ func TestReadReusesPendingBuffer(t *testing.T) {
 	}
 }
 
+// TestWriteSteadyStateAllocs needs no console: once the UTF-16 buffer has
+// grown, a Write of the same size allocates nothing, so remote output does
+// not cost a heap allocation per console write. The count the console
+// reports back is the one thing that could escape: a local whose address
+// goes to the write func value is moved to the heap.
+func TestWriteSteadyStateAllocs(t *testing.T) {
+	c := newConsole(0, 0)
+	c.writeFn = func(_ windows.Handle, _ *uint16, n uint32, written *uint32, _ *byte) error {
+		*written = n
+		return nil
+	}
+	p := []byte("remote output line\r\n")
+	write := func() {
+		if n, err := c.Write(p); n != len(p) || err != nil {
+			t.Fatalf("Write = %d, %v; want %d, nil", n, err, len(p))
+		}
+	}
+	write() // the first Write grows the UTF-16 buffer
+	if allocs := testing.AllocsPerRun(100, write); allocs != 0 {
+		t.Fatalf("a steady-state Write allocated %v times, want 0", allocs)
+	}
+}
+
 // TestReadEmptyBufferReturnsAtOnce needs no console: a Read with an empty p
 // returns 0, nil without reading the console, where it could block.
 func TestReadEmptyBufferReturnsAtOnce(t *testing.T) {
