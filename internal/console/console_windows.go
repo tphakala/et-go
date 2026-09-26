@@ -70,10 +70,14 @@ type Console struct {
 	// (GetConsoleScreenBufferInfo). nil means the real call.
 	sizeFn func(h windows.Handle, info *windows.ConsoleScreenBufferInfo) error
 
-	// Reader-owned state.
-	dec     utf16Decoder
-	units   []uint16
-	pending []byte
+	// Reader-owned state. pending holds decoded bytes not yet returned,
+	// from pendingOff on; it is reset to empty, keeping its capacity, once
+	// Read has returned all of it.
+	dec        utf16Decoder
+	units      []uint16
+	unitsRead  uint32 // units the last console read returned
+	pending    []byte
+	pendingOff int
 
 	// Writer-owned state.
 	enc utf8Encoder
@@ -248,8 +252,11 @@ func (c *Console) Read(p []byte) (int, error) {
 		c.reading = true
 		c.mu.Unlock()
 
-		var n uint32
-		err := read(c.in, &c.units[0], uint32(len(c.units)), &n, nil)
+		// The count goes into a field: a local whose address is passed to
+		// the read func value is moved to the heap, one allocation per
+		// console read (go build -gcflags=-m, go1.27).
+		c.unitsRead = 0
+		err := read(c.in, &c.units[0], uint32(len(c.units)), &c.unitsRead, nil)
 
 		c.mu.Lock()
 		c.reading = false
@@ -265,10 +272,14 @@ func (c *Console) Read(p []byte) (int, error) {
 		if err != nil {
 			return 0, fmt.Errorf("console: read: %w", err)
 		}
-		c.pending = c.dec.append(c.pending[:0], c.units[:n])
+		c.pending = c.dec.append(c.pending[:0], c.units[:c.unitsRead])
 	}
-	n := copy(p, c.pending)
-	c.pending = c.pending[n:]
+	n := copy(p, c.pending[c.pendingOff:])
+	c.pendingOff += n
+	if c.pendingOff == len(c.pending) {
+		// Drained: keep the whole capacity for the next decode.
+		c.pending, c.pendingOff = c.pending[:0], 0
+	}
 	return n, nil
 }
 
@@ -368,17 +379,7 @@ func (c *Console) Resizes(ctx context.Context) iter.Seq[Size] {
 				return
 			case <-tick.C:
 			}
-			sz, err := c.Size()
-			if errors.Is(err, os.ErrClosed) {
-				return
-			}
-			if err != nil || sz == last {
-				continue
-			}
-			last = sz
-			// select picks at random when a tick and the cancellation are
-			// both ready, so check ctx again before yielding.
-			if ctx.Err() != nil || !yield(sz) {
+			if !resizeCheck(ctx, c.Size, &last, yield) {
 				return
 			}
 		}

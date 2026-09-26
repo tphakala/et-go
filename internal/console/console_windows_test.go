@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 	"unicode/utf16"
 	"unsafe"
@@ -946,6 +947,41 @@ func TestReadSmallBufferKeepsRest(t *testing.T) {
 	}
 }
 
+// TestReadReusesPendingBuffer needs no console: draining the decoded bytes
+// in small Reads keeps the buffer's capacity, so a steady stream of console
+// reads decodes into the same buffer without allocating. The decode is 8
+// bytes, a whole allocation size class, so a buffer that lost the capacity
+// in front of the bytes already handed out would have to grow on every
+// decode.
+func TestReadReusesPendingBuffer(t *testing.T) {
+	c := newConsole(0, 0)
+	units := utf16.Encode([]rune("abcdefgh"))
+	c.readFn = func(_ windows.Handle, buf *uint16, toread uint32, read *uint32, _ *byte) error {
+		*read = uint32(copy(unsafe.Slice(buf, toread), units))
+		return nil
+	}
+	p := make([]byte, len(units))
+	drain := func() {
+		// Two 1-byte Reads, then the rest, so the buffer is drained from
+		// an offset rather than in one copy.
+		n := 0
+		for _, size := range []int{1, 1, len(p)} {
+			m, err := c.Read(p[n : n+min(size, len(p)-n)])
+			if err != nil {
+				t.Fatalf("Read: %v", err)
+			}
+			n += m
+		}
+		if string(p[:n]) != "abcdefgh" {
+			t.Fatalf("Reads returned %q, want %q", p[:n], "abcdefgh")
+		}
+	}
+	drain() // the first decode allocates the buffer
+	if allocs := testing.AllocsPerRun(100, drain); allocs != 0 {
+		t.Fatalf("draining a decode allocated %v times per console read, want 0", allocs)
+	}
+}
+
 // TestReadEmptyBufferReturnsAtOnce needs no console: a Read with an empty p
 // returns 0, nil without reading the console, where it could block.
 func TestReadEmptyBufferReturnsAtOnce(t *testing.T) {
@@ -1045,7 +1081,84 @@ func TestReadRetriesEmptyRead(t *testing.T) {
 	}
 }
 
+// TestSizeReportsCells needs no console: Size reports the visible window
+// rectangle, not the screen buffer (dwSize), which the fake makes larger
+// in both directions, as a console with scrollback reports it.
 func TestSizeReportsCells(t *testing.T) {
+	c := newConsole(0, 0)
+	c.sizeFn = func(_ windows.Handle, info *windows.ConsoleScreenBufferInfo) error {
+		info.Size = windows.Coord{X: 120, Y: 9001}
+		info.Window = windows.SmallRect{Left: 10, Top: 8977, Right: 89, Bottom: 9000}
+		return nil
+	}
+	sz, err := c.Size()
+	if err != nil {
+		t.Fatalf("Size: %v", err)
+	}
+	if sz != (Size{Rows: 24, Cols: 80}) {
+		t.Fatalf("Size() = %+v, want the 24x80 window, not the 9001x120 buffer", sz)
+	}
+}
+
+// TestResizesWindows needs no console: a poll that finds the size unchanged
+// yields nothing, a changed size is yielded once, and the range ends at the
+// first poll after Close. The fake clock advances the 200 ms poll.
+func TestResizesWindows(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := newConsole(0, 0)
+		var rows atomic.Int32
+		rows.Store(24)
+		c.sizeFn = func(_ windows.Handle, info *windows.ConsoleScreenBufferInfo) error {
+			info.Window = windows.SmallRect{Right: 79, Bottom: int16(rows.Load() - 1)}
+			return nil
+		}
+		resizes := c.Resizes(t.Context()) // baseline 24x80 is taken here
+		sizes := make(chan Size, 4)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for sz := range resizes {
+				sizes <- sz
+			}
+		}()
+		poll := func(n int) { synctest.Sleep(time.Duration(n) * resizePoll) }
+
+		poll(3)
+		if len(sizes) != 0 {
+			t.Fatalf("an unchanged size was yielded: %+v", <-sizes)
+		}
+
+		rows.Store(50)
+		poll(1)
+		if len(sizes) != 1 {
+			t.Fatalf("%d sizes yielded after one poll of a changed size, want 1", len(sizes))
+		}
+		if sz := <-sizes; sz != (Size{Rows: 50, Cols: 80}) {
+			t.Fatalf("Resizes yielded %+v, want 50x80", sz)
+		}
+		poll(3)
+		if len(sizes) != 0 {
+			t.Fatalf("the new size was yielded again: %+v", <-sizes)
+		}
+
+		_ = c.Close() // zero handles: the flush and mode calls fail
+		select {
+		case <-done:
+			t.Fatal("the range over Resizes ended before the poll after Close")
+		default:
+		}
+		poll(1)
+		select {
+		case <-done:
+		default:
+			t.Fatal("the range over Resizes did not end at the poll after Close")
+		}
+	})
+}
+
+// TestSizeOnRealConsole reads the size of the console the test binary
+// runs in, if it has one.
+func TestSizeOnRealConsole(t *testing.T) {
 	c := openConsole(t)
 	sz, err := c.Size()
 	if err != nil {

@@ -45,7 +45,9 @@ type Console struct {
 // Open checks that stdin and stdout are terminals, then opens the
 // controlling terminal (/dev/tty) as the console. It returns an error
 // satisfying errors.Is(err, ErrNotTerminal) if either is not a terminal or
-// the process has no controlling terminal.
+// the process has no controlling terminal. Any other failure to open
+// /dev/tty, such as permission denied, is returned as a plain error that
+// keeps its cause.
 //
 // Open records the terminal state as the baseline that restore returns to.
 // The intended caller opens the console before running anything that may
@@ -63,7 +65,14 @@ func open(ttyPath string, stdin, stdout *os.File) (*Console, error) {
 	}
 	tty, err := os.OpenFile(ttyPath, os.O_RDWR, 0)
 	if err != nil {
-		return nil, fmt.Errorf("%w: open %s: %w", ErrNotTerminal, ttyPath, err)
+		// err is an *fs.PathError, whose text already names the operation
+		// and the path. Only ENXIO (no controlling terminal) and ENOENT (no
+		// such device node) mean there is no terminal to open; anything
+		// else, such as EACCES, is a plain failure and says so.
+		if errors.Is(err, unix.ENXIO) || errors.Is(err, unix.ENOENT) {
+			return nil, fmt.Errorf("%w: %w", ErrNotTerminal, err)
+		}
+		return nil, fmt.Errorf("console: %w", err)
 	}
 	c, err := newConsole(tty)
 	if err != nil {
@@ -76,16 +85,11 @@ func open(ttyPath string, stdin, stdout *os.File) (*Console, error) {
 // newConsole wraps an already open terminal file and records its current
 // state as the baseline. Tests pass a pty slave.
 func newConsole(tty *os.File) (*Console, error) {
-	c := &Console{tty: tty, setState: term.Restore}
-	err := c.control(func(fd int) error {
-		var gerr error
-		c.base, gerr = term.GetState(fd)
-		return gerr
-	})
+	base, err := controlValue(tty, term.GetState)
 	if err != nil {
 		return nil, fmt.Errorf("%w: read terminal state: %w", ErrNotTerminal, err)
 	}
-	return c, nil
+	return &Console{tty: tty, base: base, setState: term.Restore}, nil
 }
 
 // MakeRaw switches the terminal to raw mode. It may be called again after
@@ -169,11 +173,8 @@ func (c *Console) Size() (Size, error) {
 	if c.closed {
 		return Size{}, fmt.Errorf("console: size: %w", os.ErrClosed)
 	}
-	var ws *unix.Winsize
-	err := c.control(func(fd int) error {
-		var gerr error
-		ws, gerr = unix.IoctlGetWinsize(fd, unix.TIOCGWINSZ)
-		return gerr
+	ws, err := controlValue(c.tty, func(fd int) (*unix.Winsize, error) {
+		return unix.IoctlGetWinsize(fd, unix.TIOCGWINSZ)
 	})
 	if err != nil {
 		return Size{}, fmt.Errorf("console: size: %w", err)
@@ -212,15 +213,8 @@ func (c *Console) Resizes(ctx context.Context) iter.Seq[Size] {
 		// would otherwise be lost: SIGWINCH is ignored by default, so a
 		// signal that fires in that gap never reaches sig. Check once,
 		// right after registering, so such a change is still caught.
-		sz, err := c.Size()
-		if errors.Is(err, os.ErrClosed) {
+		if !resizeCheck(ctx, c.Size, &last, yield) {
 			return
-		}
-		if err == nil && sz != last {
-			last = sz
-			if ctx.Err() != nil || !yield(sz) {
-				return
-			}
 		}
 
 		for {
@@ -229,17 +223,7 @@ func (c *Console) Resizes(ctx context.Context) iter.Seq[Size] {
 				return
 			case <-sig:
 			}
-			sz, err := c.Size()
-			if errors.Is(err, os.ErrClosed) {
-				return
-			}
-			if err != nil || sz == last {
-				continue
-			}
-			last = sz
-			// select picks at random when a signal and the cancellation
-			// are both ready, so check ctx again before yielding.
-			if ctx.Err() != nil || !yield(sz) {
+			if !resizeCheck(ctx, c.Size, &last, yield) {
 				return
 			}
 		}
@@ -289,12 +273,21 @@ func controlFile(file *os.File, f func(fd int) error) error {
 	return ferr
 }
 
+// controlValue runs f with file's descriptor and returns its result.
+func controlValue[T any](file *os.File, f func(fd int) (T, error)) (T, error) {
+	var out T
+	err := controlFile(file, func(fd int) error {
+		var ferr error
+		out, ferr = f(fd)
+		return ferr
+	})
+	return out, err
+}
+
 // isTerminal reports whether f is a terminal; an error reading it counts as no.
 func isTerminal(f *os.File) bool {
-	var ok bool
-	err := controlFile(f, func(fd int) error {
-		ok = term.IsTerminal(fd)
-		return nil
+	ok, err := controlValue(f, func(fd int) (bool, error) {
+		return term.IsTerminal(fd), nil
 	})
 	return err == nil && ok
 }

@@ -8,7 +8,11 @@
 // control (SIGTTIN, SIGTTOU) until it is brought to the foreground.
 package console
 
-import "errors"
+import (
+	"context"
+	"errors"
+	"os"
+)
 
 // Size is the terminal size in character cells, plus pixels when the
 // platform reports them (0 otherwise).
@@ -20,3 +24,20 @@ type Size struct {
 // ErrNotTerminal is returned by Open when stdin or stdout is not a terminal,
 // or when the process has no controlling terminal to open.
 var ErrNotTerminal = errors.New("console: stdin or stdout is not a terminal")
+
+// resizeCheck reads the size once and yields it if it changed since *last.
+// It reports false when the sequence must end: the Console is closed, ctx
+// has ended, or the loop body stopped. select picks at random when a wakeup
+// and the cancellation are both ready, so ctx is checked again before
+// yielding.
+func resizeCheck(ctx context.Context, size func() (Size, error), last *Size, yield func(Size) bool) bool {
+	sz, err := size()
+	if errors.Is(err, os.ErrClosed) {
+		return false
+	}
+	if err != nil || sz == *last {
+		return true
+	}
+	*last = sz
+	return ctx.Err() == nil && yield(sz)
+}

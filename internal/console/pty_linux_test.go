@@ -12,6 +12,11 @@ import (
 // openPTY returns a pseudo-terminal pair using only x/sys ioctls, so the
 // console tests need no extra module and no controlling terminal. Both ends
 // are closed when the test ends.
+//
+// A missing /dev/ptmx fails the test rather than skipping it: the Linux CI
+// runner (ubuntu-latest in .github/workflows/ci.yml) has one, so a skip
+// would only hide a broken environment and silently drop every test that
+// needs a pty.
 func openPTY(t *testing.T) (master, slave *os.File) {
 	t.Helper()
 	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR|unix.O_NOCTTY, 0)
@@ -56,11 +61,8 @@ func closeAtEnd(t *testing.T, f *os.File) {
 // termios reads the terminal attributes of f.
 func termios(t *testing.T, f *os.File) *unix.Termios {
 	t.Helper()
-	var tio *unix.Termios
-	err := controlFile(f, func(fd int) error {
-		var gerr error
-		tio, gerr = unix.IoctlGetTermios(fd, unix.TCGETS)
-		return gerr
+	tio, err := controlValue(f, func(fd int) (*unix.Termios, error) {
+		return unix.IoctlGetTermios(fd, unix.TCGETS)
 	})
 	if err != nil {
 		t.Fatalf("tcgets: %v", err)

@@ -1,6 +1,7 @@
 package console
 
 import (
+	"fmt"
 	"unicode/utf16"
 	"unicode/utf8"
 )
@@ -82,8 +83,13 @@ func (e *utf8Encoder) append(dst []uint16, p []byte) []uint16 {
 
 // chunkLen returns how many of units to pass to one console write of at most
 // limit units. It never ends a chunk between a high and a low surrogate, so
-// each write carries whole characters. limit must be at least 2.
+// each write carries whole characters. limit must be at least 2, or a pair
+// at the boundary would leave an empty chunk; chunkLen panics otherwise,
+// whatever the input.
 func chunkLen(units []uint16, limit int) int {
+	if limit < 2 {
+		panic(fmt.Sprintf("console: chunkLen limit %d, want at least 2", limit))
+	}
 	if len(units) <= limit {
 		return len(units)
 	}
