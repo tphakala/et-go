@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 )
@@ -305,6 +306,41 @@ func TestReadFrameGrowsExactly(t *testing.T) {
 	}
 	if !bytes.Equal(got, bytes.Repeat([]byte{'x'}, n)) {
 		t.Fatal("ReadFrame body differs from the frame written")
+	}
+}
+
+// A reader that reuses the previous frame as its buffer, as etcp's link
+// readLoop does, grows it geometrically: frames that each exceed every
+// earlier one reallocate a handful of times, not once per frame.
+func TestReadFrameReusedBufferGrowsGeometrically(t *testing.T) {
+	const frames = 4000
+	var enc bytes.Buffer
+	for i := 1; i <= frames; i++ {
+		if err := WriteFrame(&enc, bytes.Repeat([]byte{'x'}, i)); err != nil {
+			t.Fatalf("WriteFrame: %v", err)
+		}
+	}
+	stream := enc.Bytes()
+	var failed error
+	allocs := testing.AllocsPerRun(3, func() {
+		r := bytes.NewReader(stream)
+		var buf []byte
+		for i := 1; i <= frames; i++ {
+			frame, err := ReadFrame(r, buf)
+			if err != nil || len(frame) != i {
+				failed = fmt.Errorf("frame %d: len %d: %w", i, len(frame), err)
+				return
+			}
+			buf = frame
+		}
+	})
+	if failed != nil {
+		t.Fatal(failed)
+	}
+	// The bytes.Reader costs one allocation per run; growth from 1 to 4000
+	// bytes by doubling takes about a dozen more.
+	if allocs > 16 {
+		t.Fatalf("reading %d growing frames through one reused buffer allocated %v times, want at most 16", frames, allocs)
 	}
 }
 
