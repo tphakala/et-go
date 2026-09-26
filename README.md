@@ -28,9 +28,11 @@ Eternal Terminal (ET) is a remote shell that survives network changes and sleep:
 go install github.com/tphakala/et-go/cmd/et@latest
 ```
 
+This needs Go 1.27 or newer (the `go` directive in `go.mod`).
+
 ### Prebuilt binaries
 
-Tagged releases publish archives for Windows, Linux and macOS (amd64 and arm64) on the [releases page](https://github.com/tphakala/et-go/releases).
+Each `v*` tag publishes archives for Windows, Linux and macOS (amd64 and arm64) with a `checksums.txt` on the [releases page](https://github.com/tphakala/et-go/releases). No release has been tagged yet; until then, use `go install`.
 
 ## Usage
 
@@ -64,7 +66,7 @@ golangci-lint run
 go build -tags ruleguard ./rules/
 ```
 
-CI builds and vets on Linux, macOS and Windows, cross-compiles every release target with `CGO_ENABLED=0`, runs the race-enabled test suite on Linux and macOS, and runs the test suite without the race detector on Windows.
+CI builds and vets on Linux, macOS and Windows, cross-compiles every release target with `CGO_ENABLED=0`, runs the race-enabled test suite on Linux and macOS, and runs the test suite without the race detector on Windows. It also lints for both Linux and Windows, checks that every package except `cmd/et` builds for `js/wasm` and `wasip1/wasm`, checks that the generated protobuf code is current, and runs govulncheck and CodeQL. [AGENTS.md](AGENTS.md) lists the full local gate, including the end-to-end suite against a real etserver.
 
 ## License
 
